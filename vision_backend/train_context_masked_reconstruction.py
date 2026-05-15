@@ -205,6 +205,9 @@ def main() -> int:
             optimizer=optimizer,
             scheduler=scheduler,
             use_amp=use_amp,
+            progress_desc=f"Epoch {epoch:02d}/{args.epochs:02d} [train]",
+            progress_position=0,
+            leave_progress=True,
         )
         val_loss = run_context_epoch(
             model=model,
@@ -212,6 +215,9 @@ def main() -> int:
             device=device,
             optimizer=None,
             use_amp=False,
+            progress_desc=f"Epoch {epoch:02d}/{args.epochs:02d} [val]",
+            progress_position=0,
+            leave_progress=True,
         )
         current_lr = optimizer.param_groups[0]["lr"]
         history_rows.append(

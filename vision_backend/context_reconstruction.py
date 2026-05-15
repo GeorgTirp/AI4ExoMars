@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from contextlib import nullcontext
 import random
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,6 +55,43 @@ class ContextPatchLoaders:
     train_dataset: "HiRISEContextPatchDataset"
     val_dataset: "HiRISEContextPatchDataset"
     test_dataset: Optional["HiRISEContextPatchDataset"]
+
+
+def _use_cuda_amp(device: torch.device, use_amp: bool) -> bool:
+    return bool(use_amp and device.type == "cuda")
+
+
+def _autocast_context(device: torch.device, use_amp: bool):
+    if _use_cuda_amp(device, use_amp):
+        return torch.amp.autocast(device_type="cuda", enabled=True)
+    return nullcontext()
+
+
+def _create_tqdm_progress(
+    total: int,
+    desc: str,
+    *,
+    position: int = 0,
+    leave: bool = False,
+):
+    try:
+        from tqdm.auto import tqdm
+    except ModuleNotFoundError:
+        return None
+
+    return tqdm(
+        total=total,
+        desc=desc,
+        unit="batch",
+        dynamic_ncols=True,
+        smoothing=0.05,
+        position=position,
+        leave=leave,
+        bar_format=(
+            "{l_bar}{bar}| {n_fmt}/{total_fmt} "
+            "[{elapsed}<{remaining}, {rate_fmt}] {percentage:3.0f}%"
+        ),
+    )
 
 
 def _as_int(value: str) -> int:
@@ -332,37 +370,67 @@ def run_context_epoch(
     optimizer: Optional[torch.optim.Optimizer] = None,
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
     use_amp: bool = False,
+    progress_desc: Optional[str] = None,
+    progress_position: int = 0,
+    leave_progress: bool = False,
 ) -> float:
     training = optimizer is not None
     model.train(training)
 
-    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    cuda_amp = _use_cuda_amp(device, use_amp)
+    scaler = (
+        torch.amp.GradScaler("cuda", enabled=True)
+        if training and cuda_amp
+        else None
+    )
     total_loss = 0.0
     total_samples = 0
+    progress = _create_tqdm_progress(
+        total=len(dataloader),
+        desc=progress_desc or ("train" if training else "val"),
+        position=progress_position,
+        leave=leave_progress,
+    )
 
     context = torch.enable_grad if training else torch.no_grad
-    with context():
-        for batch in dataloader:
-            local = batch["local"].to(device, non_blocking=True).float()
-            context_x = batch["context"].to(device, non_blocking=True).float()
-            batch_size = local.size(0)
+    try:
+        with context():
+            for batch in dataloader:
+                local = batch["local"].to(device, non_blocking=True).float()
+                context_x = batch["context"].to(device, non_blocking=True).float()
+                batch_size = local.size(0)
 
-            if training:
-                optimizer.zero_grad(set_to_none=True)
+                if training:
+                    optimizer.zero_grad(set_to_none=True)
 
-            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
-                outputs = model(local, context_x)
-                loss = outputs["loss"]
+                with _autocast_context(device, use_amp):
+                    outputs = model(local, context_x)
+                    loss = outputs["loss"]
 
-            if training:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                if scheduler is not None:
-                    scheduler.step()
+                if training:
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        optimizer.step()
+                    if scheduler is not None:
+                        scheduler.step()
 
-            total_loss += loss.item() * batch_size
-            total_samples += batch_size
+                total_loss += loss.item() * batch_size
+                total_samples += batch_size
+
+                if progress is not None:
+                    average_loss = total_loss / max(total_samples, 1)
+                    postfix = {"loss": f"{average_loss:.4f}"}
+                    if training and optimizer is not None:
+                        postfix["lr"] = f"{optimizer.param_groups[0]['lr']:.2e}"
+                    progress.set_postfix(postfix)
+                    progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
 
     return total_loss / max(total_samples, 1)
 
@@ -434,7 +502,7 @@ def reconstruct_dataset(
             context_x = batch["context"].to(device, non_blocking=True).float()
             indices = batch["index"].tolist()
 
-            with torch.amp.autocast(device_type="cuda", enabled=use_amp):
+            with _autocast_context(device, use_amp):
                 outputs = model(local, context_x)
 
             for batch_idx, record_idx in enumerate(indices):

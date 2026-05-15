@@ -991,18 +991,18 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
             context_dim=context_dim,
         )
 
-        c1 = local_base_channels          # 1/2
-        c2 = local_base_channels * 2      # 1/4
-        c3 = local_base_channels * 4      # 1/8
-        c4 = local_base_channels * 8      # 1/16
-        c5 = local_base_channels * 16     # 1/32
+        c1 = local_base_channels          # x1: 1/2
+        c2 = local_base_channels * 2      # x2: 1/4
+        c3 = local_base_channels * 4      # x3/x4: 1/8
+        c4 = local_base_channels * 8      # x5: 1/16
+        c5 = local_base_channels * 16     # x6: 1/32
 
         # I would not condition the very earliest x1 feature at first.
         # It may inject context into very local texture too aggressively.
         self.film_x2 = ContextFiLM2d(c2, context_dim)
         self.film_x3 = ContextFiLM2d(c3, context_dim)
-        self.film_x4 = ContextFiLM2d(c4, context_dim)
-        self.film_x5 = ContextFiLM2d(c5, context_dim)
+        self.film_x4 = ContextFiLM2d(c3, context_dim)
+        self.film_x5 = ContextFiLM2d(c4, context_dim)
 
         if use_stage32:
             self.film_x6 = ContextFiLM2d(c5, context_dim)
