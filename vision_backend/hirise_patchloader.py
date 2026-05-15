@@ -210,7 +210,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-black-fraction",
         type=float,
-        default=0.25,
+        default=0.05,
         help=(
             "Drop patches whose valid region contains more than this fraction "
             "of black pixels. Set to a negative value to disable filtering."
@@ -348,8 +348,15 @@ def prepare_preview_array(array):
         arr = arr[:, :, :3]
 
     arr = arr.astype(np.float32, copy=False)
-    min_value = float(arr.min())
-    max_value = float(arr.max())
+    finite = arr[np.isfinite(arr)]
+    if finite.size == 0:
+        return np.zeros(arr.shape, dtype=np.uint8)
+
+    min_value = float(np.percentile(finite, 1.0))
+    max_value = float(np.percentile(finite, 99.0))
+    if max_value <= min_value:
+        min_value = float(finite.min())
+        max_value = float(finite.max())
 
     if max_value <= min_value:
         return np.zeros(arr.shape, dtype=np.uint8)
