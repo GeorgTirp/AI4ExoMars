@@ -21,6 +21,7 @@ By default patches are saved as ``.npy`` arrays to preserve source dtype.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import csv
 import fnmatch
 import sys
@@ -210,10 +211,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-black-fraction",
         type=float,
-        default=0.05,
+        default=0.01,
         help=(
             "Drop patches whose valid region contains more than this fraction "
             "of black pixels. Set to a negative value to disable filtering."
+        ),
+    )
+    parser.add_argument(
+        "--max-border-black-fraction",
+        type=float,
+        default=0.01,
+        help=(
+            "Drop patches whose valid region contains more than this fraction "
+            "of black pixels connected to the patch border. Set to a "
+            "negative value to disable filtering."
+        ),
+    )
+    parser.add_argument(
+        "--max-context-border-black-fraction",
+        type=float,
+        default=0.01,
+        help=(
+            "Drop patches whose raw context crop contains more than this "
+            "fraction of border-connected black pixels. Set to a negative "
+            "value to disable filtering."
         ),
     )
     parser.add_argument(
@@ -392,6 +413,11 @@ def save_preview_image(output_path: Path, patch) -> None:
 
 
 def compute_black_fraction(array, black_threshold: float) -> float:
+    black_mask = compute_black_mask(array, black_threshold=black_threshold)
+    return float(black_mask.mean())
+
+
+def compute_black_mask(array, black_threshold: float):
     np = require_numpy()
 
     arr = np.asarray(array)
@@ -402,7 +428,51 @@ def compute_black_fraction(array, black_threshold: float) -> float:
     else:
         raise ValueError(f"Unexpected patch shape: {arr.shape}")
 
-    return float(black_mask.mean())
+    return black_mask
+
+
+def compute_border_connected_black_fraction(array, black_threshold: float) -> float:
+    np = require_numpy()
+
+    black_mask = compute_black_mask(array, black_threshold=black_threshold)
+    if black_mask.size == 0:
+        return 0.0
+
+    height, width = black_mask.shape
+    visited = np.zeros_like(black_mask, dtype=bool)
+    queue: deque[tuple[int, int]] = deque()
+
+    def push(row: int, col: int) -> None:
+        if black_mask[row, col] and not visited[row, col]:
+            visited[row, col] = True
+            queue.append((row, col))
+
+    for col in range(width):
+        push(0, col)
+        push(height - 1, col)
+
+    for row in range(height):
+        push(row, 0)
+        push(row, width - 1)
+
+    neighbors = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    )
+
+    while queue:
+        row, col = queue.popleft()
+        for d_row, d_col in neighbors:
+            next_row = row + d_row
+            next_col = col + d_col
+            if not (0 <= next_row < height and 0 <= next_col < width):
+                continue
+            if black_mask[next_row, next_col] and not visited[next_row, next_col]:
+                visited[next_row, next_col] = True
+                queue.append((next_row, next_col))
+
+    return float(visited.mean())
 
 
 def _normalize_image_array(array):
@@ -726,6 +796,8 @@ def extract_patches_for_image(
     pad_value: float,
     num_examples: int,
     max_black_fraction: float,
+    max_border_black_fraction: float,
+    max_context_border_black_fraction: float,
     black_threshold: float,
     overwrite: bool,
     dry_run: bool,
@@ -766,9 +838,41 @@ def extract_patches_for_image(
                         patch,
                         black_threshold=black_threshold,
                     )
+                    border_black_fraction = compute_border_connected_black_fraction(
+                        patch,
+                        black_threshold=black_threshold,
+                    )
+                    center_y = spec.top + patch_size // 2
+                    center_x = spec.left + patch_size // 2
+                    context_spec = make_context_window_spec(
+                        image_height=reader.height,
+                        image_width=reader.width,
+                        center_y=center_y,
+                        center_x=center_x,
+                        context_size=context_size,
+                    )
+                    context_patch = reader.read_region(
+                        context_spec.read_top,
+                        context_spec.read_left,
+                        context_spec.valid_height,
+                        context_spec.valid_width,
+                    )
+                    context_border_black_fraction = (
+                        compute_border_connected_black_fraction(
+                            context_patch,
+                            black_threshold=black_threshold,
+                        )
+                    )
                     if (
                         max_black_fraction >= 0.0
                         and black_fraction > max_black_fraction
+                    ) or (
+                        max_border_black_fraction >= 0.0
+                        and border_black_fraction > max_border_black_fraction
+                    ) or (
+                        max_context_border_black_fraction >= 0.0
+                        and context_border_black_fraction
+                        > max_context_border_black_fraction
                     ):
                         skipped_black += 1
                     else:
@@ -827,10 +931,43 @@ def extract_patches_for_image(
                         patch,
                         black_threshold=black_threshold,
                     )
+                    border_black_fraction = compute_border_connected_black_fraction(
+                        patch,
+                        black_threshold=black_threshold,
+                    )
+
+                    center_y = spec.top + patch_size // 2
+                    center_x = spec.left + patch_size // 2
+                    context_spec = make_context_window_spec(
+                        image_height=reader.height,
+                        image_width=reader.width,
+                        center_y=center_y,
+                        center_x=center_x,
+                        context_size=context_size,
+                    )
+                    context_patch = reader.read_region(
+                        context_spec.read_top,
+                        context_spec.read_left,
+                        context_spec.valid_height,
+                        context_spec.valid_width,
+                    )
+                    context_border_black_fraction = (
+                        compute_border_connected_black_fraction(
+                            context_patch,
+                            black_threshold=black_threshold,
+                        )
+                    )
 
                     if (
                         max_black_fraction >= 0.0
                         and black_fraction > max_black_fraction
+                    ) or (
+                        max_border_black_fraction >= 0.0
+                        and border_black_fraction > max_border_black_fraction
+                    ) or (
+                        max_context_border_black_fraction >= 0.0
+                        and context_border_black_fraction
+                        > max_context_border_black_fraction
                     ):
                         remove_if_exists(patch_path)
                         remove_if_exists(context_path)
@@ -850,24 +987,7 @@ def extract_patches_for_image(
                             pad_value=pad_value,
                         )
                         save_patch(patch_path, patch)
-
-                    center_y = spec.top + patch_size // 2
-                    center_x = spec.left + patch_size // 2
-                    context_spec = make_context_window_spec(
-                        image_height=reader.height,
-                        image_width=reader.width,
-                        center_y=center_y,
-                        center_x=center_x,
-                        context_size=context_size,
-                    )
-
                     if overwrite or not context_path.exists():
-                        context_patch = reader.read_region(
-                            context_spec.read_top,
-                            context_spec.read_left,
-                            context_spec.valid_height,
-                            context_spec.valid_width,
-                        )
                         context_patch = pad_patch(
                             context_patch,
                             pad_top=context_spec.pad_top,
@@ -987,6 +1107,20 @@ def main() -> int:
         )
         return 1
 
+    if args.max_border_black_fraction > 1.0:
+        print(
+            "--max-border-black-fraction must be <= 1.0, or negative to disable.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.max_context_border_black_fraction > 1.0:
+        print(
+            "--max-context-border-black-fraction must be <= 1.0, or negative to disable.",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.black_threshold < 0.0:
         print("--black-threshold must be non-negative.", file=sys.stderr)
         return 1
@@ -1039,6 +1173,8 @@ def main() -> int:
                     pad_value=args.pad_value,
                     num_examples=args.num_examples,
                     max_black_fraction=args.max_black_fraction,
+                    max_border_black_fraction=args.max_border_black_fraction,
+                    max_context_border_black_fraction=args.max_context_border_black_fraction,
                     black_threshold=args.black_threshold,
                     overwrite=args.overwrite,
                     dry_run=True,
@@ -1070,6 +1206,8 @@ def main() -> int:
                     pad_value=args.pad_value,
                     num_examples=args.num_examples,
                     max_black_fraction=args.max_black_fraction,
+                    max_border_black_fraction=args.max_border_black_fraction,
+                    max_context_border_black_fraction=args.max_context_border_black_fraction,
                     black_threshold=args.black_threshold,
                     overwrite=args.overwrite,
                     dry_run=False,

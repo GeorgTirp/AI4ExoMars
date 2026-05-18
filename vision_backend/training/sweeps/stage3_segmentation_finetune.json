@@ -1,0 +1,28 @@
+{
+  "method": "bayes",
+  "metric": {
+    "name": "val/miou",
+    "goal": "maximize"
+  },
+  "parameters": {
+    "optimization.learning_rate": {
+      "distribution": "log_uniform_values",
+      "min": 1e-05,
+      "max": 0.001
+    },
+    "optimization.weight_decay": {
+      "distribution": "log_uniform_values",
+      "min": 1e-06,
+      "max": 0.05
+    },
+    "initialization.freeze_encoder_epochs": {
+      "values": [0, 3, 5, 10]
+    },
+    "model.decoder_channels": {
+      "values": [128, 192, 256]
+    },
+    "data.batch_size": {
+      "values": [2, 4, 8]
+    }
+  }
+}

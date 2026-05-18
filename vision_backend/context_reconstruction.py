@@ -186,23 +186,29 @@ def group_records_by_source(
     return grouped
 
 
-def _normalize_unit_range(array: np.ndarray) -> np.ndarray:
-    if np.issubdtype(array.dtype, np.integer):
-        info = np.iinfo(array.dtype)
-        if info.max <= 0:
-            return np.zeros(array.shape, dtype=np.float32)
-        return array.astype(np.float32) / float(info.max)
-
+def _normalize_unit_range(
+    array: np.ndarray,
+    *,
+    lower_percentile: float = 1.0,
+    upper_percentile: float = 99.0,
+) -> np.ndarray:
     arr = array.astype(np.float32, copy=False)
-    max_value = float(arr.max())
-    min_value = float(arr.min())
+    finite = arr[np.isfinite(arr)]
 
-    if min_value >= 0.0 and max_value <= 1.0:
-        return arr
-    if max_value <= min_value:
+    if finite.size == 0:
         return np.zeros(arr.shape, dtype=np.float32)
 
-    return (arr - min_value) / (max_value - min_value)
+    lo = float(np.percentile(finite, lower_percentile))
+    hi = float(np.percentile(finite, upper_percentile))
+
+    if hi <= lo:
+        lo = float(finite.min())
+        hi = float(finite.max())
+
+    if hi <= lo:
+        return np.zeros(arr.shape, dtype=np.float32)
+
+    return np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
 
 
 def _to_chw(array: np.ndarray) -> np.ndarray:
