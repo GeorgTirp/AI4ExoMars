@@ -3,14 +3,24 @@ from __future__ import annotations
 
 import argparse
 import json
-from training.wandb_utils import (
-    add_wandb_arguments,
-    finish_wandb_run,
-    init_wandb_run,
-    log_metrics,
-    maybe_run_sweep,
-    merge_wandb_config,
-)
+try:
+    from vision_backend.training.wandb_utils import (
+        add_wandb_arguments,
+        finish_wandb_run,
+        init_wandb_run,
+        log_metrics,
+        maybe_run_sweep,
+        merge_wandb_config,
+    )
+except ModuleNotFoundError:
+    from training.wandb_utils import (
+        add_wandb_arguments,
+        finish_wandb_run,
+        init_wandb_run,
+        log_metrics,
+        maybe_run_sweep,
+        merge_wandb_config,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -122,26 +132,48 @@ def _load_loader_kwargs(config_path: str | None) -> dict:
 
 def train_stage(config: dict, wandb_run=None) -> dict:
     import torch
-    from model.optimizers import (
-        create_cosine_scheduler_with_warmup,
-        create_optimizer,
-    )
-    from training.builders import (
-        build_context_segmentation_model,
-        load_encoder_from_pretrainer_checkpoint,
-    )
-    from training.utils import (
-        count_parameters,
-        freeze_module,
-        load_loader_bundle,
-        resolve_path,
-        run_segmentation_epoch,
-        save_checkpoint,
-        save_history,
-        select_device,
-        set_seed,
-        unfreeze_module,
-    )
+    try:
+        from vision_backend.model.optimizers import (
+            create_cosine_scheduler_with_warmup,
+            create_optimizer,
+        )
+        from vision_backend.training.builders import (
+            build_context_segmentation_model,
+            load_encoder_from_pretrainer_checkpoint,
+        )
+        from vision_backend.training.utils import (
+            count_parameters,
+            freeze_module,
+            load_loader_bundle,
+            resolve_path,
+            run_segmentation_epoch,
+            save_checkpoint,
+            save_history,
+            select_device,
+            set_seed,
+            unfreeze_module,
+        )
+    except ModuleNotFoundError:
+        from model.optimizers import (
+            create_cosine_scheduler_with_warmup,
+            create_optimizer,
+        )
+        from training.builders import (
+            build_context_segmentation_model,
+            load_encoder_from_pretrainer_checkpoint,
+        )
+        from training.utils import (
+            count_parameters,
+            freeze_module,
+            load_loader_bundle,
+            resolve_path,
+            run_segmentation_epoch,
+            save_checkpoint,
+            save_history,
+            select_device,
+            set_seed,
+            unfreeze_module,
+        )
 
     set_seed(torch, int(config["seed"]))
     device = select_device(torch)

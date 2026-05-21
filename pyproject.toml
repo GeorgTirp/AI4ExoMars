@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai4exomars-vision-backend"
+version = "0.1.0"
+description = "HiRISE preprocessing, self-supervised pretraining, distillation, and segmentation tooling for AI4ExoMars."
+readme = "vision_backend/training/STAGES.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "numpy>=1.26",
+  "pillow>=10.3",
+  "rasterio>=1.3.10",
+  "scipy>=1.12",
+  "torch>=2.4",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+wandb = [
+  "pyyaml>=6.0",
+  "wandb>=0.17",
+]
+notebook = [
+  "ipykernel>=6.29",
+  "matplotlib>=3.8",
+  "pandas>=2.2",
+]
+jp2-fallbacks = [
+  "glymur>=0.13",
+  "imageio>=2.34",
+]
+dev = [
+  "ipykernel>=6.29",
+  "matplotlib>=3.8",
+  "pandas>=2.2",
+  "pyyaml>=6.0",
+  "wandb>=0.17",
+]
+
+[project.scripts]
+ai4exomars-hirise-patchloader = "vision_backend.hirise_patchloader:main"
+ai4exomars-train-stage1 = "vision_backend.train_stage1_teacher_ssl:main"
+ai4exomars-train-stage2 = "vision_backend.train_stage2_student_distill:main"
+ai4exomars-train-stage3 = "vision_backend.train_stage3_segmentation_finetune:main"
+ai4exomars-train-context-reconstruction = "vision_backend.train_context_masked_reconstruction:main"
+ai4exomars-train-masked-reconstruction = "vision_backend.train_masked_reconstruction:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vision_backend"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "vision_backend",
+  "pyproject.toml",
+]

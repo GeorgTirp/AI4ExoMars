@@ -22,22 +22,33 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
 import fnmatch
+from multiprocessing import Manager
+import os
+from queue import Empty
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+import time
 from typing import Iterable, Iterator
 
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT_DIR = WORKSPACE_ROOT / "data"
-DEFAULT_OUTPUT_DIR = DEFAULT_INPUT_DIR / "hirise_patches"
+DEFAULT_OUTPUT_DIR = DEFAULT_INPUT_DIR / "hirise_context_pairs"
 INDEX_FILENAME = "patch_index.csv"
 MANIFEST_FILENAME = "manifest.csv"
 EXAMPLES_DIRNAME = "examples"
 EXAMPLES_MANIFEST_FILENAME = "examples_manifest.csv"
 CONTEXTS_DIRNAME = "contexts"
+CONTEXT_BASES_DIRNAME = "context_bases"
+CONTEXT_CACHE_DIRNAME = "context_cache"
+DEFAULT_MASK_STRIPE_HEIGHT = 2048
+MAX_INTEGRAL_IMAGE_PIXELS = 200_000_000
+DEFAULT_PARALLEL_PROGRESS_UPDATE_INTERVAL = 64
+DEFAULT_PROGRESS_FLUSH_SECONDS = 0.35
 
 
 @dataclass(frozen=True)
@@ -64,6 +75,35 @@ class WindowSpec:
     pad_bottom: int
     pad_left: int
     pad_right: int
+
+
+@dataclass(frozen=True)
+class ImageProcessingResult:
+    image_path: str
+    manifest_path: str
+    kept: int
+    skipped_black: int
+
+
+@dataclass(frozen=True)
+class ImageInventory:
+    image_path: Path
+    reader_backend: str
+    height: int
+    width: int
+    channels: int
+    dtype: str
+    total_candidates: int
+    analyzed_candidates: int
+
+
+class LocalProgressReporter:
+    def __init__(self, progress_bar):
+        self.progress_bar = progress_bar
+
+    def put(self, count: int) -> None:
+        if self.progress_bar is not None and count > 0:
+            self.progress_bar.update(int(count))
 
 
 class BaseImageReader:
@@ -161,8 +201,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--context-size",
         type=int,
-        default=1024,
+        default=2048,
         help="Square context window size in source-image pixels.",
+    )
+    parser.add_argument(
+        "--context-output-size",
+        type=int,
+        default=None,
+        help=(
+            "Spatial size for precomputed context tensors. Defaults to the "
+            "local patch size when omitted."
+        ),
     )
     parser.add_argument(
         "--stride",
@@ -193,9 +242,34 @@ def parse_args() -> argparse.Namespace:
         help="Search the input directory recursively.",
     )
     parser.add_argument(
+        "--num-processes",
+        type=int,
+        default=1,
+        help=(
+            "How many source images to preprocess in parallel. "
+            "Use 1 to keep processing serial."
+        ),
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite existing patch files instead of skipping them.",
+    )
+    parser.add_argument(
+        "--disable-shared-context-base",
+        action="store_true",
+        help=(
+            "Skip writing the shared downsampled context base per source image. "
+            "This keeps only local patches plus manifest metadata."
+        ),
+    )
+    parser.add_argument(
+        "--write-context-cache",
+        action="store_true",
+        help=(
+            "Also write per-sample precomputed context tensors at "
+            "--context-output-size for maximum training throughput."
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -207,6 +281,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="How many example preview patches to save per source image.",
+    )
+    parser.add_argument(
+        "--max-patches-per-image",
+        type=int,
+        default=25000,
+        help=(
+            "Maximum number of candidate patches to analyze per image. "
+            "When an image exceeds this, the candidates are subsampled evenly "
+            "across the scan order. Set to a negative value to disable the cap."
+        ),
     )
     parser.add_argument(
         "--max-black-fraction",
@@ -267,7 +351,14 @@ def require_numpy():
     return np
 
 
-def create_progress_bar(total: int, desc: str):
+def create_progress_bar(
+    total: int,
+    desc: str,
+    *,
+    unit: str = "patch",
+    position: int = 0,
+    leave: bool = True,
+):
     try:
         from tqdm.auto import tqdm
     except ModuleNotFoundError:
@@ -276,7 +367,9 @@ def create_progress_bar(total: int, desc: str):
     return tqdm(
         total=total,
         desc=desc,
-        unit="patch",
+        unit=unit,
+        position=position,
+        leave=leave,
         dynamic_ncols=True,
         smoothing=0.05,
         bar_format=(
@@ -341,6 +434,8 @@ def preview_manifest_fieldnames() -> list[str]:
         "preview_path",
         "patch_path",
         "context_path",
+        "context_base_path",
+        "context_cache_path",
         "example_index",
         "row",
         "col",
@@ -431,19 +526,43 @@ def compute_black_mask(array, black_threshold: float):
     return black_mask
 
 
-def compute_border_connected_black_fraction(array, black_threshold: float) -> float:
+def compute_border_connected_fraction_from_mask(black_mask) -> float:
     np = require_numpy()
 
-    black_mask = compute_black_mask(array, black_threshold=black_threshold)
-    if black_mask.size == 0:
+    mask = np.asarray(black_mask, dtype=bool)
+    if mask.size == 0:
         return 0.0
 
-    height, width = black_mask.shape
-    visited = np.zeros_like(black_mask, dtype=bool)
+    try:
+        from scipy import ndimage
+
+        border_seed = np.zeros_like(mask, dtype=bool)
+        border_seed[0, :] = mask[0, :]
+        border_seed[-1, :] = mask[-1, :]
+        border_seed[:, 0] |= mask[:, 0]
+        border_seed[:, -1] |= mask[:, -1]
+
+        if not border_seed.any():
+            return 0.0
+
+        connected = ndimage.binary_propagation(
+            border_seed,
+            structure=np.ones((3, 3), dtype=bool),
+            mask=mask,
+        )
+        return float(connected.mean())
+    except ModuleNotFoundError:
+        pass
+
+    if mask.size == 0:
+        return 0.0
+
+    height, width = mask.shape
+    visited = np.zeros_like(mask, dtype=bool)
     queue: deque[tuple[int, int]] = deque()
 
     def push(row: int, col: int) -> None:
-        if black_mask[row, col] and not visited[row, col]:
+        if mask[row, col] and not visited[row, col]:
             visited[row, col] = True
             queue.append((row, col))
 
@@ -468,11 +587,16 @@ def compute_border_connected_black_fraction(array, black_threshold: float) -> fl
             next_col = col + d_col
             if not (0 <= next_row < height and 0 <= next_col < width):
                 continue
-            if black_mask[next_row, next_col] and not visited[next_row, next_col]:
+            if mask[next_row, next_col] and not visited[next_row, next_col]:
                 visited[next_row, next_col] = True
                 queue.append((next_row, next_col))
 
     return float(visited.mean())
+
+
+def compute_border_connected_black_fraction(array, black_threshold: float) -> float:
+    black_mask = compute_black_mask(array, black_threshold=black_threshold)
+    return compute_border_connected_fraction_from_mask(black_mask)
 
 
 def _normalize_image_array(array):
@@ -533,6 +657,69 @@ def open_image_reader(path: Path) -> BaseImageReader:
     )
 
 
+def build_full_black_mask(
+    reader: BaseImageReader,
+    *,
+    black_threshold: float,
+    stripe_height: int = DEFAULT_MASK_STRIPE_HEIGHT,
+):
+    np = require_numpy()
+
+    stripe_height = max(1, min(int(stripe_height), reader.height))
+    black_mask = np.zeros((reader.height, reader.width), dtype=bool)
+
+    for top in range(0, reader.height, stripe_height):
+        height = min(stripe_height, reader.height - top)
+        stripe = reader.read_region(top, 0, height, reader.width)
+        black_mask[top : top + height, :] = compute_black_mask(
+            stripe,
+            black_threshold=black_threshold,
+        )
+
+    return black_mask
+
+
+def maybe_build_integral_image(black_mask):
+    np = require_numpy()
+
+    if int(np.prod(black_mask.shape, dtype=np.int64)) > MAX_INTEGRAL_IMAGE_PIXELS:
+        return None
+
+    integral = np.asarray(black_mask, dtype=np.uint32)
+    integral = integral.cumsum(axis=0, dtype=np.uint32)
+    integral = integral.cumsum(axis=1, dtype=np.uint32)
+    return integral
+
+
+def query_integral_sum(integral, top: int, left: int, height: int, width: int) -> int:
+    bottom = top + height - 1
+    right = left + width - 1
+
+    total = int(integral[bottom, right])
+    if top > 0:
+        total -= int(integral[top - 1, right])
+    if left > 0:
+        total -= int(integral[bottom, left - 1])
+    if top > 0 and left > 0:
+        total += int(integral[top - 1, left - 1])
+    return total
+
+
+def extract_black_mask_window(
+    black_mask,
+    *,
+    top: int,
+    left: int,
+    height: int,
+    width: int,
+):
+    return black_mask[top : top + height, left : left + width]
+
+
+def compute_black_fraction_from_mask_window(black_mask_window) -> float:
+    return float(black_mask_window.mean())
+
+
 def find_jp2_files(input_dir: Path, pattern: str, recursive: bool) -> list[Path]:
     iterator: Iterable[Path]
     if recursive:
@@ -581,6 +768,144 @@ def iter_patch_specs(
                 pad_bottom=patch_size - valid_height,
                 pad_right=patch_size - valid_width,
             )
+
+
+def count_patch_candidates(
+    image_height: int,
+    image_width: int,
+    stride: int,
+) -> int:
+    return len(iter_start_positions(image_height, stride)) * len(
+        iter_start_positions(image_width, stride)
+    )
+
+
+def limit_patch_specs(
+    specs: list[PatchSpec],
+    *,
+    max_patches_per_image: int,
+) -> list[PatchSpec]:
+    if max_patches_per_image < 0 or len(specs) <= max_patches_per_image:
+        return specs
+
+    selected_indices = select_example_indices(len(specs), max_patches_per_image)
+    return [specs[index] for index in selected_indices]
+
+
+def format_image_shape(width: int, height: int) -> str:
+    return f"{width}x{height}"
+
+
+def inspect_image(
+    image_path: Path,
+    *,
+    stride: int,
+    max_patches_per_image: int,
+) -> ImageInventory:
+    with open_image_reader(image_path) as reader:
+        total_candidates = count_patch_candidates(
+            reader.height,
+            reader.width,
+            stride,
+        )
+        analyzed_candidates = (
+            total_candidates
+            if max_patches_per_image < 0
+            else min(total_candidates, max_patches_per_image)
+        )
+        return ImageInventory(
+            image_path=image_path,
+            reader_backend=reader.backend,
+            height=reader.height,
+            width=reader.width,
+            channels=reader.channels,
+            dtype=reader.dtype,
+            total_candidates=total_candidates,
+            analyzed_candidates=analyzed_candidates,
+        )
+
+
+def print_run_configuration(
+    *,
+    input_dir: Path,
+    output_dir: Path,
+    patch_size: int,
+    context_size: int,
+    context_output_size: int,
+    stride: int,
+    write_shared_context_base: bool,
+    write_context_cache: bool,
+    max_patches_per_image: int,
+    num_processes: int,
+    dry_run: bool,
+) -> None:
+    print(f"[run] Input directory: {input_dir}")
+    print(f"[run] Output directory: {output_dir}")
+    print(
+        f"[run] Local patch size: {patch_size}; context: "
+        f"{context_size}->{context_output_size}; stride: {stride}"
+    )
+    print(
+        f"[run] Shared context base: {'yes' if write_shared_context_base else 'no'}; "
+        f"paired context cache: {'yes' if write_context_cache else 'no'}"
+    )
+    print(
+        "[run] Max analyzed patches per image: "
+        f"{'unlimited' if max_patches_per_image < 0 else max_patches_per_image}; "
+        f"worker processes: {num_processes}; mode: "
+        f"{'dry-run' if dry_run else 'write'}"
+    )
+
+
+def print_image_inventory(images: list[ImageInventory]) -> None:
+    print("[images] Source inventory:")
+    for inventory in images:
+        cap_note = ""
+        if inventory.analyzed_candidates < inventory.total_candidates:
+            cap_note = (
+                f" -> analyzing {inventory.analyzed_candidates}/"
+                f"{inventory.total_candidates}"
+            )
+        else:
+            cap_note = f" -> analyzing {inventory.analyzed_candidates}"
+
+        print(
+            f"  - {inventory.image_path.name}: "
+            f"{format_image_shape(inventory.width, inventory.height)}, "
+            f"{inventory.channels} channel(s), {inventory.dtype}, "
+            f"backend={inventory.reader_backend}{cap_note}"
+        )
+
+
+def terminate_process_pool(executor: ProcessPoolExecutor) -> None:
+    executor.shutdown(wait=False, cancel_futures=True)
+
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+
+    for process in processes.values():
+        if process.is_alive():
+            process.terminate()
+
+    for process in processes.values():
+        process.join(timeout=1.0)
+
+
+def drain_progress_queue(progress_queue, progress_bar) -> int:
+    if progress_queue is None or progress_bar is None:
+        return 0
+
+    drained = 0
+    while True:
+        try:
+            drained += int(progress_queue.get_nowait())
+        except Empty:
+            break
+
+    if drained > 0:
+        progress_bar.update(drained)
+    return drained
 
 
 def compute_centered_window_spec(
@@ -682,6 +1007,96 @@ def remove_if_exists(path: Path) -> None:
         return
 
 
+def to_dataset_relative(path: Path, dataset_root: Path) -> str:
+    return os.path.relpath(path, dataset_root)
+
+
+def context_base_filename(
+    image_stem: str,
+    context_size: int,
+    context_output_size: int,
+) -> str:
+    return (
+        f"{image_stem}"
+        f"_context_base_c{context_size:04d}"
+        f"_o{context_output_size:04d}.npy"
+    )
+
+
+def context_cache_filename(
+    image_stem: str,
+    spec: PatchSpec,
+    context_output_size: int,
+) -> str:
+    return (
+        f"{image_stem}"
+        f"_context_o{context_output_size:04d}"
+        f"_r{spec.row:04d}"
+        f"_c{spec.col:04d}"
+        f"_y{spec.top:07d}"
+        f"_x{spec.left:07d}.npy"
+    )
+
+
+def downsample_integer_factor(array, factor: int):
+    np = require_numpy()
+
+    if factor <= 1:
+        return np.ascontiguousarray(array)
+
+    arr = np.asarray(array)
+    squeeze_channel = False
+    if arr.ndim == 2:
+        arr = arr[:, :, None]
+        squeeze_channel = True
+    elif arr.ndim != 3:
+        raise ValueError(f"Unexpected array shape for downsampling: {arr.shape}")
+
+    pad_bottom = (-arr.shape[0]) % factor
+    pad_right = (-arr.shape[1]) % factor
+    if pad_bottom or pad_right:
+        arr = pad_patch(
+            arr,
+            pad_top=0,
+            pad_bottom=pad_bottom,
+            pad_left=0,
+            pad_right=pad_right,
+            pad_mode="edge",
+            pad_value=0.0,
+        )
+
+    arr = arr.astype(np.float32, copy=False)
+    height, width, channels = arr.shape
+    arr = arr.reshape(
+        height // factor,
+        factor,
+        width // factor,
+        factor,
+        channels,
+    ).mean(axis=(1, 3))
+
+    if squeeze_channel:
+        return arr[:, :, 0]
+    return arr
+
+
+def build_shared_context_base(reader: BaseImageReader, factor: int):
+    target_height = max(1, (reader.height + factor - 1) // factor)
+    target_width = max(1, (reader.width + factor - 1) // factor)
+
+    if isinstance(reader, RasterioImageReader):
+        from rasterio.enums import Resampling
+
+        data = reader._dataset.read(
+            out_shape=(reader.channels, target_height, target_width),
+            resampling=Resampling.average,
+        )
+        return _normalize_image_array(data)
+
+    full_image = reader.read_region(0, 0, reader.height, reader.width)
+    return downsample_integer_factor(full_image, factor)
+
+
 def patch_filename(image_stem: str, spec: PatchSpec) -> str:
     return (
         f"{image_stem}"
@@ -708,6 +1123,11 @@ def manifest_fieldnames() -> list[str]:
         "reader_backend",
         "patch_path",
         "context_path",
+        "context_base_path",
+        "context_cache_path",
+        "local_storage",
+        "context_output_size",
+        "context_scale",
         "patch_name",
         "row",
         "col",
@@ -724,6 +1144,7 @@ def manifest_fieldnames() -> list[str]:
         "channels",
         "dtype",
         "pad_mode",
+        "pad_value",
         "context_size",
         "context_top",
         "context_left",
@@ -738,24 +1159,45 @@ def manifest_fieldnames() -> list[str]:
 
 
 def build_manifest_row(
+    dataset_root: Path,
     image_path: Path,
     patch_path: Path,
-    context_path: Path,
+    context_base_path: Path | None,
+    context_cache_path: Path | None,
     spec: PatchSpec,
     *,
     patch_size: int,
     stride: int,
     pad_mode: str,
+    pad_value: float,
     reader: BaseImageReader,
     context_size: int,
+    context_output_size: int,
+    context_scale: int,
     context_spec: WindowSpec,
     black_fraction: float,
 ) -> dict[str, object]:
+    encoded_patch_path = to_dataset_relative(patch_path, dataset_root)
+    encoded_context_base = (
+        to_dataset_relative(context_base_path, dataset_root)
+        if context_base_path is not None
+        else ""
+    )
+    encoded_context_cache = (
+        to_dataset_relative(context_cache_path, dataset_root)
+        if context_cache_path is not None
+        else ""
+    )
     return {
-        "source_image": str(image_path),
+        "source_image": to_dataset_relative(image_path, dataset_root),
         "reader_backend": reader.backend,
-        "patch_path": str(patch_path),
-        "context_path": str(context_path),
+        "patch_path": encoded_patch_path,
+        "context_path": encoded_context_cache,
+        "context_base_path": encoded_context_base,
+        "context_cache_path": encoded_context_cache,
+        "local_storage": "patch_file",
+        "context_output_size": context_output_size,
+        "context_scale": context_scale,
         "patch_name": patch_path.name,
         "row": spec.row,
         "col": spec.col,
@@ -772,6 +1214,7 @@ def build_manifest_row(
         "channels": reader.channels,
         "dtype": reader.dtype,
         "pad_mode": pad_mode,
+        "pad_value": pad_value,
         "context_size": context_size,
         "context_top": context_spec.requested_top,
         "context_left": context_spec.requested_left,
@@ -791,6 +1234,10 @@ def extract_patches_for_image(
     *,
     patch_size: int,
     context_size: int,
+    context_output_size: int,
+    write_shared_context_base: bool,
+    write_context_cache: bool,
+    context_scale: int,
     stride: int,
     pad_mode: str,
     pad_value: float,
@@ -801,8 +1248,12 @@ def extract_patches_for_image(
     black_threshold: float,
     overwrite: bool,
     dry_run: bool,
-    global_writer: csv.DictWriter,
-) -> tuple[int, int]:
+    max_patches_per_image: int,
+    show_patch_progress: bool,
+    progress_queue=None,
+    progress_update_interval: int = DEFAULT_PARALLEL_PROGRESS_UPDATE_INTERVAL,
+    progress_flush_seconds: float = DEFAULT_PROGRESS_FLUSH_SECONDS,
+) -> ImageProcessingResult:
     image_output_dir = output_dir / image_path.stem
     if not dry_run:
         image_output_dir.mkdir(parents=True, exist_ok=True)
@@ -816,32 +1267,110 @@ def extract_patches_for_image(
                 stride=stride,
             )
         )
+        specs = limit_patch_specs(
+            specs,
+            max_patches_per_image=max_patches_per_image,
+        )
         manifest_path = image_output_dir / MANIFEST_FILENAME
         fieldnames = manifest_fieldnames()
+        context_base_dir = image_output_dir / CONTEXT_BASES_DIRNAME
+        context_cache_dir = image_output_dir / CONTEXT_CACHE_DIRNAME
+        legacy_context_dir = image_output_dir / CONTEXTS_DIRNAME
+        context_base_path = (
+            context_base_dir
+            / context_base_filename(
+                image_path.stem,
+                context_size=context_size,
+                context_output_size=context_output_size,
+            )
+            if write_shared_context_base
+            else None
+        )
+        queued_progress = 0
+        last_progress_flush = time.monotonic()
+
+        def note_progress() -> None:
+            nonlocal queued_progress, last_progress_flush
+
+            if progress is not None:
+                progress.update(1)
+            if progress_queue is not None:
+                queued_progress += 1
+                now = time.monotonic()
+                if (
+                    queued_progress >= progress_update_interval
+                    or (now - last_progress_flush) >= progress_flush_seconds
+                ):
+                    progress_queue.put(queued_progress)
+                    queued_progress = 0
+                    last_progress_flush = now
+
+        def flush_progress() -> None:
+            nonlocal queued_progress, last_progress_flush
+
+            if progress_queue is not None and queued_progress > 0:
+                progress_queue.put(queued_progress)
+                queued_progress = 0
+                last_progress_flush = time.monotonic()
 
         if dry_run:
             kept = 0
             skipped_black = 0
-            progress = create_progress_bar(
-                total=len(specs),
-                desc=f"{image_path.name} [scan:{reader.backend}]",
+            full_black_mask = build_full_black_mask(
+                reader,
+                black_threshold=black_threshold,
+            )
+            black_integral = maybe_build_integral_image(full_black_mask)
+            progress = (
+                create_progress_bar(
+                    total=len(specs),
+                    desc=f"{image_path.name} [scan:{reader.backend}]",
+                    unit="patch",
+                    position=1,
+                    leave=False,
+                )
+                if show_patch_progress
+                else None
             )
             try:
                 for spec in specs:
-                    patch = reader.read_region(
-                        spec.top,
-                        spec.left,
-                        spec.valid_height,
-                        spec.valid_width,
+                    local_black_mask = extract_black_mask_window(
+                        full_black_mask,
+                        top=spec.top,
+                        left=spec.left,
+                        height=spec.valid_height,
+                        width=spec.valid_width,
                     )
-                    black_fraction = compute_black_fraction(
-                        patch,
-                        black_threshold=black_threshold,
+                    if black_integral is not None:
+                        local_black_count = query_integral_sum(
+                            black_integral,
+                            spec.top,
+                            spec.left,
+                            spec.valid_height,
+                            spec.valid_width,
+                        )
+                        black_fraction = (
+                            local_black_count / float(spec.valid_height * spec.valid_width)
+                        )
+                    else:
+                        black_fraction = compute_black_fraction_from_mask_window(
+                            local_black_mask
+                        )
+                    border_black_fraction = compute_border_connected_fraction_from_mask(
+                        local_black_mask
                     )
-                    border_black_fraction = compute_border_connected_black_fraction(
-                        patch,
-                        black_threshold=black_threshold,
-                    )
+
+                    if (
+                        max_black_fraction >= 0.0
+                        and black_fraction > max_black_fraction
+                    ) or (
+                        max_border_black_fraction >= 0.0
+                        and border_black_fraction > max_border_black_fraction
+                    ):
+                        skipped_black += 1
+                        note_progress()
+                        continue
+
                     center_y = spec.top + patch_size // 2
                     center_x = spec.left + patch_size // 2
                     context_spec = make_context_window_spec(
@@ -851,25 +1380,19 @@ def extract_patches_for_image(
                         center_x=center_x,
                         context_size=context_size,
                     )
-                    context_patch = reader.read_region(
-                        context_spec.read_top,
-                        context_spec.read_left,
-                        context_spec.valid_height,
-                        context_spec.valid_width,
+                    context_black_mask = extract_black_mask_window(
+                        full_black_mask,
+                        top=context_spec.read_top,
+                        left=context_spec.read_left,
+                        height=context_spec.valid_height,
+                        width=context_spec.valid_width,
                     )
                     context_border_black_fraction = (
-                        compute_border_connected_black_fraction(
-                            context_patch,
-                            black_threshold=black_threshold,
+                        compute_border_connected_fraction_from_mask(
+                            context_black_mask
                         )
                     )
                     if (
-                        max_black_fraction >= 0.0
-                        and black_fraction > max_black_fraction
-                    ) or (
-                        max_border_black_fraction >= 0.0
-                        and border_black_fraction > max_border_black_fraction
-                    ) or (
                         max_context_border_black_fraction >= 0.0
                         and context_border_black_fraction
                         > max_context_border_black_fraction
@@ -878,9 +1401,9 @@ def extract_patches_for_image(
                     else:
                         kept += 1
 
-                    if progress is not None:
-                        progress.update(1)
+                    note_progress()
             finally:
+                flush_progress()
                 if progress is not None:
                     progress.close()
 
@@ -893,18 +1416,38 @@ def extract_patches_for_image(
                 f"{min(num_examples, kept)} examples, "
                 f"context_size={context_size} via {reader.backend}"
             )
-            return kept, skipped_black
+            return ImageProcessingResult(
+                image_path=str(image_path),
+                manifest_path=str(manifest_path),
+                kept=kept,
+                skipped_black=skipped_black,
+            )
 
         examples_dir = image_output_dir / EXAMPLES_DIRNAME
-        contexts_dir = image_output_dir / CONTEXTS_DIRNAME
         if examples_dir.exists():
             for stale_preview in examples_dir.glob("example_*.png"):
                 remove_if_exists(stale_preview)
             remove_if_exists(examples_dir / EXAMPLES_MANIFEST_FILENAME)
-        if contexts_dir.exists():
-            for stale_context in contexts_dir.glob("*.npy"):
-                if overwrite:
-                    remove_if_exists(stale_context)
+        if overwrite and context_cache_dir.exists():
+            for stale_context in context_cache_dir.glob("*.npy"):
+                remove_if_exists(stale_context)
+        if overwrite and legacy_context_dir.exists():
+            for stale_context in legacy_context_dir.glob("*.npy"):
+                remove_if_exists(stale_context)
+        if overwrite and context_base_dir.exists():
+            for stale_base in context_base_dir.glob("*.npy"):
+                remove_if_exists(stale_base)
+
+        if write_shared_context_base and context_base_path is not None:
+            if overwrite or not context_base_path.exists():
+                shared_context_base = build_shared_context_base(reader, context_scale)
+                save_patch(context_base_path, shared_context_base)
+
+        full_black_mask = build_full_black_mask(
+            reader,
+            black_threshold=black_threshold,
+        )
+        black_integral = maybe_build_integral_image(full_black_mask)
 
         with manifest_path.open("w", newline="") as manifest_file:
             manifest_writer = csv.DictWriter(manifest_file, fieldnames=fieldnames)
@@ -916,25 +1459,64 @@ def extract_patches_for_image(
             progress = create_progress_bar(
                 total=len(specs),
                 desc=f"{image_path.name} [{reader.backend}]",
+                unit="patch",
+                position=1,
+                leave=False,
             )
+            if not show_patch_progress:
+                progress = None
             try:
                 for spec in specs:
                     patch_path = image_output_dir / patch_filename(image_path.stem, spec)
-                    context_path = contexts_dir / context_filename(image_path.stem, spec)
-                    patch = reader.read_region(
-                        spec.top,
-                        spec.left,
-                        spec.valid_height,
-                        spec.valid_width,
+                    context_cache_path = (
+                        context_cache_dir
+                        / context_cache_filename(
+                            image_path.stem,
+                            spec,
+                            context_output_size=context_output_size,
+                        )
+                        if write_context_cache
+                        else None
                     )
-                    black_fraction = compute_black_fraction(
-                        patch,
-                        black_threshold=black_threshold,
+                    local_black_mask = extract_black_mask_window(
+                        full_black_mask,
+                        top=spec.top,
+                        left=spec.left,
+                        height=spec.valid_height,
+                        width=spec.valid_width,
                     )
-                    border_black_fraction = compute_border_connected_black_fraction(
-                        patch,
-                        black_threshold=black_threshold,
+                    if black_integral is not None:
+                        local_black_count = query_integral_sum(
+                            black_integral,
+                            spec.top,
+                            spec.left,
+                            spec.valid_height,
+                            spec.valid_width,
+                        )
+                        black_fraction = (
+                            local_black_count / float(spec.valid_height * spec.valid_width)
+                        )
+                    else:
+                        black_fraction = compute_black_fraction_from_mask_window(
+                            local_black_mask
+                        )
+                    border_black_fraction = compute_border_connected_fraction_from_mask(
+                        local_black_mask
                     )
+
+                    if (
+                        max_black_fraction >= 0.0
+                        and black_fraction > max_black_fraction
+                    ) or (
+                        max_border_black_fraction >= 0.0
+                        and border_black_fraction > max_border_black_fraction
+                    ):
+                        remove_if_exists(patch_path)
+                        if context_cache_path is not None:
+                            remove_if_exists(context_cache_path)
+                        skipped_black += 1
+                        note_progress()
+                        continue
 
                     center_y = spec.top + patch_size // 2
                     center_x = spec.left + patch_size // 2
@@ -945,38 +1527,38 @@ def extract_patches_for_image(
                         center_x=center_x,
                         context_size=context_size,
                     )
-                    context_patch = reader.read_region(
-                        context_spec.read_top,
-                        context_spec.read_left,
-                        context_spec.valid_height,
-                        context_spec.valid_width,
+                    context_black_mask = extract_black_mask_window(
+                        full_black_mask,
+                        top=context_spec.read_top,
+                        left=context_spec.read_left,
+                        height=context_spec.valid_height,
+                        width=context_spec.valid_width,
                     )
                     context_border_black_fraction = (
-                        compute_border_connected_black_fraction(
-                            context_patch,
-                            black_threshold=black_threshold,
+                        compute_border_connected_fraction_from_mask(
+                            context_black_mask
                         )
                     )
-
                     if (
-                        max_black_fraction >= 0.0
-                        and black_fraction > max_black_fraction
-                    ) or (
-                        max_border_black_fraction >= 0.0
-                        and border_black_fraction > max_border_black_fraction
-                    ) or (
                         max_context_border_black_fraction >= 0.0
                         and context_border_black_fraction
                         > max_context_border_black_fraction
                     ):
                         remove_if_exists(patch_path)
-                        remove_if_exists(context_path)
+                        if context_cache_path is not None:
+                            remove_if_exists(context_cache_path)
                         skipped_black += 1
-                        if progress is not None:
-                            progress.update(1)
+                        note_progress()
                         continue
 
+                    patch = None
                     if overwrite or not patch_path.exists():
+                        patch = reader.read_region(
+                            spec.top,
+                            spec.left,
+                            spec.valid_height,
+                            spec.valid_width,
+                        )
                         patch = pad_patch(
                             patch,
                             pad_top=0,
@@ -987,7 +1569,16 @@ def extract_patches_for_image(
                             pad_value=pad_value,
                         )
                         save_patch(patch_path, patch)
-                    if overwrite or not context_path.exists():
+
+                    if context_cache_path is not None and (
+                        overwrite or not context_cache_path.exists()
+                    ):
+                        context_patch = reader.read_region(
+                            context_spec.read_top,
+                            context_spec.read_left,
+                            context_spec.valid_height,
+                            context_spec.valid_width,
+                        )
                         context_patch = pad_patch(
                             context_patch,
                             pad_top=context_spec.pad_top,
@@ -997,29 +1588,38 @@ def extract_patches_for_image(
                             pad_mode=pad_mode,
                             pad_value=pad_value,
                         )
-                        save_patch(context_path, context_patch)
+                        if context_scale > 1:
+                            context_patch = downsample_integer_factor(
+                                context_patch,
+                                context_scale,
+                            )
+                        save_patch(context_cache_path, context_patch)
 
                     row = build_manifest_row(
+                        dataset_root=output_dir,
                         image_path=image_path,
                         patch_path=patch_path,
-                        context_path=context_path,
+                        context_base_path=context_base_path,
+                        context_cache_path=context_cache_path,
                         spec=spec,
                         patch_size=patch_size,
                         stride=stride,
                         pad_mode=pad_mode,
+                        pad_value=pad_value,
                         reader=reader,
                         context_size=context_size,
+                        context_output_size=context_output_size,
+                        context_scale=context_scale,
                         context_spec=context_spec,
                         black_fraction=black_fraction,
                     )
                     manifest_writer.writerow(row)
-                    global_writer.writerow(row)
                     kept_rows.append(row)
                     written += 1
 
-                    if progress is not None:
-                        progress.update(1)
+                    note_progress()
             finally:
+                flush_progress()
                 if progress is not None:
                     progress.close()
 
@@ -1037,7 +1637,7 @@ def extract_patches_for_image(
 
                 for example_index, kept_index in enumerate(selected_indices, start=1):
                     row = kept_rows[kept_index]
-                    patch_path = Path(str(row["patch_path"]))
+                    patch_path = output_dir / str(row["patch_path"])
                     preview_path = examples_dir / preview_filename(
                         image_path.stem,
                         example_index,
@@ -1052,11 +1652,13 @@ def extract_patches_for_image(
 
                     example_manifest_writer.writerow(
                         {
-                            "source_image": str(image_path),
+                            "source_image": row["source_image"],
                             "reader_backend": reader.backend,
-                            "preview_path": str(preview_path),
-                            "patch_path": str(patch_path),
+                            "preview_path": to_dataset_relative(preview_path, output_dir),
+                            "patch_path": row["patch_path"],
                             "context_path": row["context_path"],
+                            "context_base_path": row["context_base_path"],
+                            "context_cache_path": row["context_cache_path"],
                             "example_index": example_index,
                             "row": row["row"],
                             "col": row["col"],
@@ -1078,11 +1680,88 @@ def extract_patches_for_image(
 
         print(
             f"[ok] {image_path.name}: kept {written} patches, skipped "
-            f"{skipped_black} black-border patches, saved raw contexts "
-            f"at {context_size} px, and saved "
-            f"{saved_examples} previews to {image_output_dir}"
+            f"{skipped_black} black-border patches, "
+            f"{'wrote shared context base, ' if write_shared_context_base else ''}"
+            f"{'wrote paired context cache, ' if write_context_cache else ''}"
+            f"and saved {saved_examples} previews to {image_output_dir}"
         )
-        return written, skipped_black
+        return ImageProcessingResult(
+            image_path=str(image_path),
+            manifest_path=str(manifest_path),
+            kept=written,
+            skipped_black=skipped_black,
+        )
+
+
+def process_image_worker(
+    *,
+    image_path: str,
+    output_dir: str,
+    patch_size: int,
+    context_size: int,
+    context_output_size: int,
+    write_shared_context_base: bool,
+    write_context_cache: bool,
+    context_scale: int,
+    stride: int,
+    pad_mode: str,
+    pad_value: float,
+    num_examples: int,
+    max_black_fraction: float,
+    max_border_black_fraction: float,
+    max_context_border_black_fraction: float,
+    black_threshold: float,
+    overwrite: bool,
+    dry_run: bool,
+    max_patches_per_image: int,
+    show_patch_progress: bool,
+    progress_queue=None,
+    progress_update_interval: int = DEFAULT_PARALLEL_PROGRESS_UPDATE_INTERVAL,
+    progress_flush_seconds: float = DEFAULT_PROGRESS_FLUSH_SECONDS,
+) -> ImageProcessingResult:
+    return extract_patches_for_image(
+        image_path=Path(image_path),
+        output_dir=Path(output_dir),
+        patch_size=patch_size,
+        context_size=context_size,
+        context_output_size=context_output_size,
+        write_shared_context_base=write_shared_context_base,
+        write_context_cache=write_context_cache,
+        context_scale=context_scale,
+        stride=stride,
+        pad_mode=pad_mode,
+        pad_value=pad_value,
+        num_examples=num_examples,
+        max_black_fraction=max_black_fraction,
+        max_border_black_fraction=max_border_black_fraction,
+        max_context_border_black_fraction=max_context_border_black_fraction,
+        black_threshold=black_threshold,
+        overwrite=overwrite,
+        dry_run=dry_run,
+        max_patches_per_image=max_patches_per_image,
+        show_patch_progress=show_patch_progress,
+        progress_queue=progress_queue,
+        progress_update_interval=progress_update_interval,
+        progress_flush_seconds=progress_flush_seconds,
+    )
+
+
+def write_global_index(
+    output_path: Path,
+    manifest_paths: Iterable[Path],
+) -> None:
+    fieldnames = manifest_fieldnames()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with output_path.open("w", newline="") as index_file:
+        writer = csv.DictWriter(index_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for manifest_path in manifest_paths:
+            with manifest_path.open(newline="") as manifest_file:
+                reader = csv.DictReader(manifest_file)
+                for row in reader:
+                    writer.writerow(row)
 
 
 def main() -> int:
@@ -1096,8 +1775,19 @@ def main() -> int:
         print("--context-size must be positive.", file=sys.stderr)
         return 1
 
+    if args.context_output_size is not None and args.context_output_size <= 0:
+        print("--context-output-size must be positive.", file=sys.stderr)
+        return 1
+
     if args.num_examples < 0:
         print("--num-examples must be non-negative.", file=sys.stderr)
+        return 1
+
+    if args.max_patches_per_image == 0:
+        print(
+            "--max-patches-per-image must be positive, or negative to disable.",
+            file=sys.stderr,
+        )
         return 1
 
     if args.max_black_fraction > 1.0:
@@ -1130,6 +1820,35 @@ def main() -> int:
         print("--stride must be positive.", file=sys.stderr)
         return 1
 
+    if args.num_processes <= 0:
+        print("--num-processes must be positive.", file=sys.stderr)
+        return 1
+
+    context_output_size = (
+        args.context_output_size
+        if args.context_output_size is not None
+        else min(args.patch_size, args.context_size)
+    )
+    if context_output_size > args.context_size:
+        print(
+            "--context-output-size must be <= --context-size.",
+            file=sys.stderr,
+        )
+        return 1
+
+    write_shared_context_base = not args.disable_shared_context_base
+    if write_shared_context_base or args.write_context_cache:
+        if args.context_size % context_output_size != 0:
+            print(
+                "--context-size must be divisible by --context-output-size "
+                "when writing shared or cached precomputed contexts.",
+                file=sys.stderr,
+            )
+            return 1
+        context_scale = args.context_size // context_output_size
+    else:
+        context_scale = 1
+
     input_dir = resolve_path(args.input_dir)
     output_dir = resolve_path(args.output_dir)
 
@@ -1153,68 +1872,196 @@ def main() -> int:
     total_skipped = 0
 
     try:
-        if args.dry_run:
-            print(
-                f"[dry-run] Found {len(images)} JP2 images under {input_dir}",
-                flush=True,
+        print_run_configuration(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            patch_size=args.patch_size,
+            context_size=args.context_size,
+            context_output_size=context_output_size,
+            stride=stride,
+            write_shared_context_base=write_shared_context_base,
+            write_context_cache=args.write_context_cache,
+            max_patches_per_image=args.max_patches_per_image,
+            num_processes=args.num_processes,
+            dry_run=args.dry_run,
+        )
+
+        print(f"[scan] Inspecting {len(images)} JP2 image(s)...", flush=True)
+        inventory_records = [
+            inspect_image(
+                image_path,
+                stride=stride,
+                max_patches_per_image=args.max_patches_per_image,
             )
-            global_writer = csv.DictWriter(
-                sys.stdout,
-                fieldnames=manifest_fieldnames(),
+            for image_path in images
+        ]
+        print_image_inventory(inventory_records)
+
+        total_candidates = sum(
+            record.total_candidates for record in inventory_records
+        )
+        total_analyzed = sum(
+            record.analyzed_candidates for record in inventory_records
+        )
+        print(
+            f"[scan] Total candidates: {total_candidates}; "
+            f"configured to analyze: {total_analyzed}"
+        )
+
+        worker_kwargs = {
+            "output_dir": str(output_dir),
+            "patch_size": args.patch_size,
+            "context_size": args.context_size,
+            "context_output_size": context_output_size,
+            "write_shared_context_base": write_shared_context_base,
+            "write_context_cache": args.write_context_cache,
+            "context_scale": context_scale,
+            "stride": stride,
+            "pad_mode": args.pad_mode,
+            "pad_value": args.pad_value,
+            "num_examples": args.num_examples,
+            "max_black_fraction": args.max_black_fraction,
+            "max_border_black_fraction": args.max_border_black_fraction,
+            "max_context_border_black_fraction": args.max_context_border_black_fraction,
+            "black_threshold": args.black_threshold,
+            "overwrite": args.overwrite,
+            "dry_run": args.dry_run,
+            "max_patches_per_image": args.max_patches_per_image,
+            "show_patch_progress": False,
+            "progress_queue": None,
+            "progress_update_interval": DEFAULT_PARALLEL_PROGRESS_UPDATE_INTERVAL,
+        }
+
+        results_by_image: dict[Path, ImageProcessingResult] = {}
+        image_progress = create_progress_bar(
+            total=len(images),
+            desc=(
+                "Images cached"
+                if args.write_context_cache and not args.dry_run
+                else "Images processed"
+            ),
+            unit="image",
+            position=0,
+            leave=True,
+        )
+        patch_progress = (
+            create_progress_bar(
+                total=total_analyzed,
+                desc="Patches analyzed",
+                unit="patch",
+                position=1,
+                leave=True,
             )
-            for image_path in images:
-                kept, skipped = extract_patches_for_image(
-                    image_path=image_path,
-                    output_dir=output_dir,
-                    patch_size=args.patch_size,
-                    context_size=args.context_size,
-                    stride=stride,
-                    pad_mode=args.pad_mode,
-                    pad_value=args.pad_value,
-                    num_examples=args.num_examples,
-                    max_black_fraction=args.max_black_fraction,
-                    max_border_black_fraction=args.max_border_black_fraction,
-                    max_context_border_black_fraction=args.max_context_border_black_fraction,
-                    black_threshold=args.black_threshold,
-                    overwrite=args.overwrite,
-                    dry_run=True,
-                    global_writer=global_writer,
+            if total_analyzed > 0
+            else None
+        )
+        executor: ProcessPoolExecutor | None = None
+
+        try:
+            if args.num_processes == 1 or len(images) == 1:
+                serial_worker_kwargs = dict(worker_kwargs)
+                serial_worker_kwargs["progress_queue"] = LocalProgressReporter(
+                    patch_progress
                 )
-                total_patches += kept
-                total_skipped += skipped
+                for image_path in images:
+                    result = process_image_worker(
+                        image_path=str(image_path),
+                        **serial_worker_kwargs,
+                    )
+                    results_by_image[image_path] = result
+                    total_patches += result.kept
+                    total_skipped += result.skipped_black
+                    if image_progress is not None:
+                        image_progress.set_postfix(
+                            {
+                                "kept": total_patches,
+                                "skipped": total_skipped,
+                                "current": image_path.name,
+                            }
+                        )
+                        image_progress.update(1)
+                    if patch_progress is not None:
+                        patch_progress.set_postfix(
+                            {
+                                "kept": total_patches,
+                                "skipped": total_skipped,
+                            }
+                        )
+            else:
+                parallel_worker_kwargs = dict(worker_kwargs)
+                with Manager() as manager:
+                    parallel_worker_kwargs["progress_queue"] = manager.Queue()
+                    with ProcessPoolExecutor(max_workers=args.num_processes) as executor:
+                        future_to_image = {
+                            executor.submit(
+                                process_image_worker,
+                                image_path=str(image_path),
+                                **parallel_worker_kwargs,
+                            ): image_path
+                            for image_path in images
+                        }
+                        pending_futures = set(future_to_image)
+                        while pending_futures:
+                            done_futures, pending_futures = wait(
+                                pending_futures,
+                                timeout=0.2,
+                                return_when=FIRST_COMPLETED,
+                            )
+                            drain_progress_queue(
+                                parallel_worker_kwargs["progress_queue"],
+                                patch_progress,
+                            )
+                            for future in done_futures:
+                                image_path = future_to_image[future]
+                                result = future.result()
+                                results_by_image[image_path] = result
+                                total_patches += result.kept
+                                total_skipped += result.skipped_black
+                                if image_progress is not None:
+                                    image_progress.set_postfix(
+                                        {
+                                            "kept": total_patches,
+                                            "skipped": total_skipped,
+                                            "current": image_path.name,
+                                        }
+                                    )
+                                    image_progress.update(1)
+                                if patch_progress is not None:
+                                    patch_progress.set_postfix(
+                                        {
+                                            "kept": total_patches,
+                                            "skipped": total_skipped,
+                                        }
+                                    )
+                        drain_progress_queue(
+                            parallel_worker_kwargs["progress_queue"],
+                            patch_progress,
+                        )
+                        if patch_progress is not None and patch_progress.n < total_analyzed:
+                            patch_progress.update(total_analyzed - patch_progress.n)
+        except KeyboardInterrupt:
+            print("\n[interrupt] Stopping patch extraction...", file=sys.stderr)
+            if executor is not None:
+                try:
+                    terminate_process_pool(executor)
+                except Exception:
+                    pass
+            return 130
+        finally:
+            if patch_progress is not None:
+                patch_progress.close()
+            if image_progress is not None:
+                image_progress.close()
+
+        if args.dry_run:
             print(
                 f"[dry-run] Total kept patches: {total_patches}; "
                 f"total skipped patches: {total_skipped}"
             )
             return 0
 
-        with index_path.open("w", newline="") as index_file:
-            global_writer = csv.DictWriter(
-                index_file,
-                fieldnames=manifest_fieldnames(),
-            )
-            global_writer.writeheader()
-
-            for image_path in images:
-                kept, skipped = extract_patches_for_image(
-                    image_path=image_path,
-                    output_dir=output_dir,
-                    patch_size=args.patch_size,
-                    context_size=args.context_size,
-                    stride=stride,
-                    pad_mode=args.pad_mode,
-                    pad_value=args.pad_value,
-                    num_examples=args.num_examples,
-                    max_black_fraction=args.max_black_fraction,
-                    max_border_black_fraction=args.max_border_black_fraction,
-                    max_context_border_black_fraction=args.max_context_border_black_fraction,
-                    black_threshold=args.black_threshold,
-                    overwrite=args.overwrite,
-                    dry_run=False,
-                    global_writer=global_writer,
-                )
-                total_patches += kept
-                total_skipped += skipped
+        manifest_paths = [Path(results_by_image[image_path].manifest_path) for image_path in images]
+        write_global_index(index_path, manifest_paths)
     except (ModuleNotFoundError, RuntimeError, ValueError, OSError) as exc:
         print(f"[error] {exc}", file=sys.stderr)
         return 1

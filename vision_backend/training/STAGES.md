@@ -32,11 +32,36 @@ This directory holds the shared pieces for a three-stage HiRISE pipeline.
 
 ## Example Commands
 
+Patch extraction:
+
+```bash
+python3 AI4ExoMars/vision_backend/hirise_patchloader.py \
+  --input-dir data \
+  --output-dir data/hirise_context_pairs \
+  --patch-size 256 \
+  --context-size 2048 \
+  --context-output-size 256 \
+  --stride 256 \
+  --write-context-cache
+```
+
+Runtime backends:
+
+- `auto`
+  - Prefer per-sample cached `256x256` context tensors when available, otherwise fall back to the shared per-image context base, then to raw JP2 reads.
+- `offline_shared_context`
+  - Use local patch files plus one shared downsampled context base per source image.
+- `offline_paired_context`
+  - Use local patch files plus precomputed per-sample context tensors for maximum cluster throughput.
+- `online_jp2`
+  - Read local and context windows directly from the raw JP2 source image.
+
 Stage 1:
 
 ```bash
 python3 AI4ExoMars/vision_backend/train_stage1_teacher_ssl.py \
   --index-path data/hirise_context_pairs/patch_index.csv \
+  --dataset-backend auto \
   --wandb --wandb-project ai4exomars
 ```
 
@@ -45,6 +70,7 @@ Stage 2:
 ```bash
 python3 AI4ExoMars/vision_backend/train_stage2_student_distill.py \
   --index-path data/hirise_context_pairs/patch_index.csv \
+  --dataset-backend auto \
   --teacher-checkpoint checkpoints/stage1_teacher_ssl.pt \
   --wandb --wandb-project ai4exomars
 ```

@@ -12,12 +12,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--index-path",
-        default="data/hirise_patches/patch_index.csv",
+        default="data/hirise_context_pairs/patch_index.csv",
         help="Path to the paired local/context patch index CSV.",
     )
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--dataset-backend",
+        choices=("auto", "offline_shared_context", "offline_paired_context", "online_jp2"),
+        default="auto",
+        help="How to materialize context tensors at training time.",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
@@ -110,20 +116,34 @@ def main() -> int:
 
     try:
         import torch
-
-        from context_reconstruction import (
-            collect_context_examples,
-            create_context_patch_dataloaders,
-            run_context_epoch,
-        )
-        from model.model import (
-            ContextAwareConvNeXtSwinEncoder,
-            ContextAwareMaskedReconstructionPretrainer,
-        )
-        from model.optimizers import (
-            create_cosine_scheduler_with_warmup,
-            create_optimizer,
-        )
+        try:
+            from vision_backend.context_reconstruction import (
+                collect_context_examples,
+                create_context_patch_dataloaders,
+                run_context_epoch,
+            )
+            from vision_backend.model.model import (
+                ContextAwareConvNeXtSwinEncoder,
+                ContextAwareMaskedReconstructionPretrainer,
+            )
+            from vision_backend.model.optimizers import (
+                create_cosine_scheduler_with_warmup,
+                create_optimizer,
+            )
+        except ModuleNotFoundError:
+            from context_reconstruction import (
+                collect_context_examples,
+                create_context_patch_dataloaders,
+                run_context_epoch,
+            )
+            from model.model import (
+                ContextAwareConvNeXtSwinEncoder,
+                ContextAwareMaskedReconstructionPretrainer,
+            )
+            from model.optimizers import (
+                create_cosine_scheduler_with_warmup,
+                create_optimizer,
+            )
     except ModuleNotFoundError as exc:
         missing = exc.name or "a required package"
         print(f"Unable to import the context reconstruction stack because `{missing}` is not installed.")
@@ -144,6 +164,7 @@ def main() -> int:
     loaders = create_context_patch_dataloaders(
         index_path=index_path,
         batch_size=args.batch_size,
+        dataset_backend=args.dataset_backend,
         local_input_size=args.local_input_size,
         context_input_size=args.context_input_size,
         val_fraction=args.val_fraction,

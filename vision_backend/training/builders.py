@@ -3,10 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from model.model import (
-    ContextAwareConvNeXtSwinEncoder,
-    ContextAwareMaskedReconstructionPretrainer,
-)
+try:
+    from vision_backend.model.model import (
+        ContextAwareConvNeXtSwinEncoder,
+        ContextAwareMaskedReconstructionPretrainer,
+    )
+except ModuleNotFoundError:
+    from model.model import (
+        ContextAwareConvNeXtSwinEncoder,
+        ContextAwareMaskedReconstructionPretrainer,
+    )
 
 from .segmentation import ContextAwareSegmentationModel
 from .utils import extract_state_dict, load_checkpoint, load_prefixed_state_dict

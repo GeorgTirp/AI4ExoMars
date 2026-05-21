@@ -2,14 +2,24 @@
 from __future__ import annotations
 
 import argparse
-from training.wandb_utils import (
-    add_wandb_arguments,
-    finish_wandb_run,
-    init_wandb_run,
-    log_metrics,
-    maybe_run_sweep,
-    merge_wandb_config,
-)
+try:
+    from vision_backend.training.wandb_utils import (
+        add_wandb_arguments,
+        finish_wandb_run,
+        init_wandb_run,
+        log_metrics,
+        maybe_run_sweep,
+        merge_wandb_config,
+    )
+except ModuleNotFoundError:
+    from training.wandb_utils import (
+        add_wandb_arguments,
+        finish_wandb_run,
+        init_wandb_run,
+        log_metrics,
+        maybe_run_sweep,
+        merge_wandb_config,
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,6 +30,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument(
+        "--dataset-backend",
+        choices=("auto", "offline_shared_context", "offline_paired_context", "online_jp2"),
+        default="auto",
+    )
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
@@ -73,6 +88,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "index_path": args.index_path,
             "batch_size": args.batch_size,
             "num_workers": args.num_workers,
+            "dataset_backend": args.dataset_backend,
             "local_input_size": args.local_input_size,
             "context_input_size": args.context_input_size,
             "val_fraction": args.val_fraction,
@@ -111,24 +127,44 @@ def build_config(args: argparse.Namespace) -> dict:
 
 def train_stage(config: dict, wandb_run=None) -> dict:
     import torch
-    from context_reconstruction import (
-        collect_context_examples,
-        create_context_patch_dataloaders,
-        run_context_epoch,
-    )
-    from model.optimizers import (
-        create_cosine_scheduler_with_warmup,
-        create_optimizer,
-    )
-    from training.builders import build_context_pretrainer
-    from training.utils import (
-        count_parameters,
-        resolve_path,
-        save_checkpoint,
-        save_history,
-        select_device,
-        set_seed,
-    )
+    try:
+        from vision_backend.context_reconstruction import (
+            collect_context_examples,
+            create_context_patch_dataloaders,
+            run_context_epoch,
+        )
+        from vision_backend.model.optimizers import (
+            create_cosine_scheduler_with_warmup,
+            create_optimizer,
+        )
+        from vision_backend.training.builders import build_context_pretrainer
+        from vision_backend.training.utils import (
+            count_parameters,
+            resolve_path,
+            save_checkpoint,
+            save_history,
+            select_device,
+            set_seed,
+        )
+    except ModuleNotFoundError:
+        from context_reconstruction import (
+            collect_context_examples,
+            create_context_patch_dataloaders,
+            run_context_epoch,
+        )
+        from model.optimizers import (
+            create_cosine_scheduler_with_warmup,
+            create_optimizer,
+        )
+        from training.builders import build_context_pretrainer
+        from training.utils import (
+            count_parameters,
+            resolve_path,
+            save_checkpoint,
+            save_history,
+            select_device,
+            set_seed,
+        )
 
     set_seed(torch, int(config["seed"]))
     device = select_device(torch)
@@ -146,6 +182,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     loaders = create_context_patch_dataloaders(
         index_path=resolve_path(data_config["index_path"]),
         batch_size=int(data_config["batch_size"]),
+        dataset_backend=str(data_config.get("dataset_backend", "auto")),
         local_input_size=int(data_config["local_input_size"]),
         context_input_size=int(data_config["context_input_size"]),
         val_fraction=float(data_config["val_fraction"]),

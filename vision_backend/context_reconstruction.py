@@ -12,13 +12,27 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
+try:
+    from hirise_patchloader import compute_centered_window_spec, open_image_reader, pad_patch
+except ModuleNotFoundError:
+    from .hirise_patchloader import (
+        compute_centered_window_spec,
+        open_image_reader,
+        pad_patch,
+    )
+
 
 @dataclass(frozen=True)
 class PatchRecord:
     source_image: str
     reader_backend: str
-    patch_path: Path
-    context_path: Path
+    patch_path: Optional[Path]
+    context_path: Optional[Path]
+    context_base_path: Optional[Path]
+    context_cache_path: Optional[Path]
+    local_storage: str
+    context_output_size: int
+    context_scale: float
     patch_name: str
     row: int
     col: int
@@ -35,6 +49,7 @@ class PatchRecord:
     channels: int
     dtype: str
     pad_mode: str
+    pad_value: float
     context_size: int
     context_top: int
     context_left: int
@@ -102,19 +117,66 @@ def _as_float(value: str) -> float:
     return float(value)
 
 
+def _resolve_index_path(index_root: Path, value: str) -> Optional[Path]:
+    raw = value.strip()
+    if not raw:
+        return None
+
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = (index_root / path).resolve()
+    return path
+
+
 def load_patch_records(index_path: str | Path) -> list[PatchRecord]:
     index_path = Path(index_path)
+    index_root = index_path.parent.resolve()
     records: list[PatchRecord] = []
 
     with index_path.open(newline="") as f:
         reader = csv.DictReader(f)
         for row in reader:
+            patch_path = _resolve_index_path(index_root, row.get("patch_path", ""))
+            context_base_path = _resolve_index_path(
+                index_root,
+                row.get("context_base_path", ""),
+            )
+            context_cache_path = _resolve_index_path(
+                index_root,
+                row.get("context_cache_path", ""),
+            )
+            legacy_context_path = _resolve_index_path(
+                index_root,
+                row.get("context_path", ""),
+            )
+            if context_cache_path is None:
+                context_cache_path = legacy_context_path
+
+            source_image_path = _resolve_index_path(index_root, row["source_image"])
+            context_size = _as_int(row["context_size"])
+            context_output_size = _as_int(
+                row.get("context_output_size") or row.get("context_size") or "0"
+            )
+            context_scale = _as_float(
+                row.get("context_scale")
+                or str(
+                    max(
+                        context_size / max(context_output_size, 1),
+                        1.0,
+                    )
+                )
+            )
             records.append(
                 PatchRecord(
-                    source_image=row["source_image"],
+                    source_image=str(source_image_path or row["source_image"]),
                     reader_backend=row["reader_backend"],
-                    patch_path=Path(row["patch_path"]),
-                    context_path=Path(row["context_path"]),
+                    patch_path=patch_path,
+                    context_path=context_cache_path,
+                    context_base_path=context_base_path,
+                    context_cache_path=context_cache_path,
+                    local_storage=row.get("local_storage", "patch_file"),
+                    context_output_size=context_output_size,
+                    context_scale=context_scale,
                     patch_name=row["patch_name"],
                     row=_as_int(row["row"]),
                     col=_as_int(row["col"]),
@@ -131,7 +193,8 @@ def load_patch_records(index_path: str | Path) -> list[PatchRecord]:
                     channels=_as_int(row["channels"]),
                     dtype=row["dtype"],
                     pad_mode=row["pad_mode"],
-                    context_size=_as_int(row["context_size"]),
+                    pad_value=_as_float(row.get("pad_value", "0.0")),
+                    context_size=context_size,
                     context_top=_as_int(row["context_top"]),
                     context_left=_as_int(row["context_left"]),
                     context_valid_height=_as_int(row["context_valid_height"]),
@@ -248,25 +311,28 @@ class HiRISEContextPatchDataset(Dataset):
         self,
         records: Sequence[PatchRecord],
         *,
+        dataset_backend: str = "auto",
         local_input_size: Optional[int] = None,
         context_input_size: Optional[int] = None,
         normalize: bool = True,
     ):
         self.records = list(records)
+        self.dataset_backend = dataset_backend
         self.local_input_size = local_input_size
         self.context_input_size = context_input_size
         self.normalize = normalize
+        self._context_base_cache: dict[str, np.ndarray] = {}
+        self._reader_cache: dict[str, object] = {}
 
     def __len__(self) -> int:
         return len(self.records)
 
-    def _load_tensor(
+    def _array_to_tensor(
         self,
-        path: Path,
+        array: np.ndarray,
         *,
         target_size: Optional[int],
     ) -> torch.Tensor:
-        array = np.load(path)
         if self.normalize:
             array = _normalize_unit_range(array)
         else:
@@ -280,23 +346,181 @@ class HiRISEContextPatchDataset(Dataset):
             ).squeeze(0)
         return tensor
 
+    def _load_tensor(
+        self,
+        path: Path,
+        *,
+        target_size: Optional[int],
+    ) -> torch.Tensor:
+        return self._array_to_tensor(np.load(path), target_size=target_size)
+
+    def _get_reader(self, record: PatchRecord):
+        cached = self._reader_cache.get(record.source_image)
+        if cached is None:
+            cached = open_image_reader(Path(record.source_image))
+            self._reader_cache[record.source_image] = cached
+        return cached
+
+    def _read_local_online(self, record: PatchRecord) -> np.ndarray:
+        reader = self._get_reader(record)
+        patch = reader.read_region(
+            record.top,
+            record.left,
+            record.valid_height,
+            record.valid_width,
+        )
+        return pad_patch(
+            patch,
+            pad_top=0,
+            pad_bottom=record.pad_bottom,
+            pad_left=0,
+            pad_right=record.pad_right,
+            pad_mode=record.pad_mode,
+            pad_value=record.pad_value,
+        )
+
+    def _read_context_online(self, record: PatchRecord) -> np.ndarray:
+        reader = self._get_reader(record)
+        read_top = max(record.context_top, 0)
+        read_left = max(record.context_left, 0)
+        patch = reader.read_region(
+            read_top,
+            read_left,
+            record.context_valid_height,
+            record.context_valid_width,
+        )
+        return pad_patch(
+            patch,
+            pad_top=record.context_pad_top,
+            pad_bottom=record.context_pad_bottom,
+            pad_left=record.context_pad_left,
+            pad_right=record.context_pad_right,
+            pad_mode=record.pad_mode,
+            pad_value=record.pad_value,
+        )
+
+    def _load_context_base_array(self, record: PatchRecord) -> np.ndarray:
+        if record.context_base_path is None:
+            raise FileNotFoundError(
+                f"No shared context base is available for {record.patch_name}."
+            )
+
+        key = str(record.context_base_path)
+        cached = self._context_base_cache.get(key)
+        if cached is None:
+            cached = np.load(record.context_base_path)
+            self._context_base_cache[key] = cached
+        return cached
+
+    def _read_context_from_shared_base(self, record: PatchRecord) -> np.ndarray:
+        base = self._load_context_base_array(record)
+        output_size = max(record.context_output_size, 1)
+
+        if base.ndim == 2:
+            base_height, base_width = base.shape
+        else:
+            base_height, base_width = base.shape[:2]
+
+        center_y = record.top + record.patch_size // 2
+        center_x = record.left + record.patch_size // 2
+        center_y_base = int(round(center_y / max(record.context_scale, 1.0)))
+        center_x_base = int(round(center_x / max(record.context_scale, 1.0)))
+        center_y_base = min(max(center_y_base, 0), max(base_height - 1, 0))
+        center_x_base = min(max(center_x_base, 0), max(base_width - 1, 0))
+
+        (
+            _requested_top,
+            read_top,
+            valid_height,
+            pad_top,
+            pad_bottom,
+        ) = compute_centered_window_spec(base_height, center_y_base, output_size)
+        (
+            _requested_left,
+            read_left,
+            valid_width,
+            pad_left,
+            pad_right,
+        ) = compute_centered_window_spec(base_width, center_x_base, output_size)
+
+        if base.ndim == 2:
+            crop = base[read_top : read_top + valid_height, read_left : read_left + valid_width]
+        else:
+            crop = base[
+                read_top : read_top + valid_height,
+                read_left : read_left + valid_width,
+                :,
+            ]
+
+        return pad_patch(
+            crop,
+            pad_top=pad_top,
+            pad_bottom=pad_bottom,
+            pad_left=pad_left,
+            pad_right=pad_right,
+            pad_mode=record.pad_mode,
+            pad_value=record.pad_value,
+        )
+
+    def _resolve_backend(self, record: PatchRecord) -> str:
+        if self.dataset_backend != "auto":
+            return self.dataset_backend
+
+        if record.context_cache_path is not None and record.context_cache_path.exists():
+            return "offline_paired_context"
+        if record.context_base_path is not None and record.context_base_path.exists():
+            return "offline_shared_context"
+        return "online_jp2"
+
+    def _load_local_array(self, record: PatchRecord) -> np.ndarray:
+        if record.patch_path is not None and record.patch_path.exists():
+            return np.load(record.patch_path)
+        return self._read_local_online(record)
+
+    def _load_context_array(self, record: PatchRecord, backend: str) -> np.ndarray:
+        if backend == "offline_paired_context":
+            if record.context_cache_path is None or not record.context_cache_path.exists():
+                raise FileNotFoundError(
+                    f"Missing per-sample context cache for {record.patch_name}."
+                )
+            return np.load(record.context_cache_path)
+
+        if backend == "offline_shared_context":
+            return self._read_context_from_shared_base(record)
+
+        if backend == "online_jp2":
+            return self._read_context_online(record)
+
+        raise ValueError(f"Unsupported dataset backend: {backend}")
+
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor | int]:
         record = self.records[index]
-        local = self._load_tensor(
-            record.patch_path,
+        backend = self._resolve_backend(record)
+        local = self._array_to_tensor(
+            self._load_local_array(record),
             target_size=self.local_input_size,
         )
-        context = self._load_tensor(
-            record.context_path,
+        context = self._array_to_tensor(
+            self._load_context_array(record, backend),
             target_size=self.context_input_size,
         )
         return {"local": local, "context": context, "index": index}
+
+    def __del__(self) -> None:
+        for reader in self._reader_cache.values():
+            close = getattr(reader, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
 def create_context_patch_dataloaders(
     index_path: str | Path,
     *,
     batch_size: int = 8,
+    dataset_backend: str = "auto",
     local_input_size: Optional[int] = None,
     context_input_size: Optional[int] = None,
     val_fraction: float = 0.1,
@@ -314,17 +538,20 @@ def create_context_patch_dataloaders(
 
     train_dataset = HiRISEContextPatchDataset(
         train_records,
+        dataset_backend=dataset_backend,
         local_input_size=local_input_size,
         context_input_size=context_input_size,
     )
     val_dataset = HiRISEContextPatchDataset(
         val_records,
+        dataset_backend=dataset_backend,
         local_input_size=local_input_size,
         context_input_size=context_input_size,
     )
     test_dataset = (
         HiRISEContextPatchDataset(
             test_records,
+            dataset_backend=dataset_backend,
             local_input_size=local_input_size,
             context_input_size=context_input_size,
         )

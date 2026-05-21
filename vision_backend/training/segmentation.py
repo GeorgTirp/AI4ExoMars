@@ -6,7 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from model.model import ConvNeXtBlock, LayerNorm2d
+try:
+    from vision_backend.model.model import ConvNeXtBlock, LayerNorm2d
+except ModuleNotFoundError:
+    from model.model import ConvNeXtBlock, LayerNorm2d
 
 
 class LightweightSegmentationDecoder(nn.Module):
