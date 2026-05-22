@@ -71,7 +71,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-fraction", type=float, default=0.0)
     parser.add_argument("--disable-stage32", action="store_true")
     parser.add_argument("--use-muon", action="store_true")
+    parser.add_argument(
+        "--initial-checkpoint-path",
+        default="checkpoints/stage1_teacher_ssl_initial.pt",
+    )
     parser.add_argument("--checkpoint-path", default="checkpoints/stage1_teacher_ssl.pt")
+    parser.add_argument(
+        "--final-checkpoint-path",
+        default="checkpoints/stage1_teacher_ssl_final.pt",
+    )
     parser.add_argument("--history-path", default="outputs/stage1_teacher_ssl_history.csv")
     parser.add_argument("--examples-path", default="outputs/stage1_teacher_ssl_examples.pt")
     parser.add_argument("--num-examples", type=int, default=5)
@@ -117,7 +125,9 @@ def build_config(args: argparse.Namespace) -> dict:
             "use_muon": args.use_muon,
         },
         "output": {
+            "initial_checkpoint_path": args.initial_checkpoint_path,
             "checkpoint_path": args.checkpoint_path,
+            "final_checkpoint_path": args.final_checkpoint_path,
             "history_path": args.history_path,
             "examples_path": args.examples_path,
             "num_examples": args.num_examples,
@@ -175,7 +185,9 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     optimization = config["optimization"]
     output = config["output"]
 
+    initial_checkpoint_path = resolve_path(output["initial_checkpoint_path"])
     checkpoint_path = resolve_path(output["checkpoint_path"])
+    final_checkpoint_path = resolve_path(output["final_checkpoint_path"])
     history_path = resolve_path(output["history_path"])
     examples_path = resolve_path(output["examples_path"])
 
@@ -205,14 +217,30 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         num_warmup_steps=warmup_steps,
         num_training_steps=total_steps,
     )
+    save_checkpoint(
+        torch,
+        {
+            "stage": config["stage"],
+            "epoch": 0,
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "metrics": {},
+            "config": config,
+        },
+        initial_checkpoint_path,
+    )
 
     print(f"Using device: {device}")
     print(f"Teacher params: {count_parameters(model):,}")
     print(f"Teacher trainable params: {count_parameters(model, trainable_only=True):,}")
     print(f"Train patches: {len(loaders.train_dataset)}")
     print(f"Val patches:   {len(loaders.val_dataset)}")
+    if loaders.test_dataset is not None:
+        print(f"Test patches:  {len(loaders.test_dataset)}")
+    print(f"Saved initial checkpoint to {initial_checkpoint_path}")
 
-    history_rows: list[dict[str, float]] = []
+    history_rows: list[dict[str, float | int | None]] = []
     best_val_loss = float("inf")
     best_epoch = 0
 
@@ -238,26 +266,46 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             progress_position=0,
             leave_progress=True,
         )
+        test_loss = None
+        if loaders.test is not None:
+            test_loss = run_context_epoch(
+                model=model,
+                dataloader=loaders.test,
+                device=device,
+                optimizer=None,
+                use_amp=False,
+                progress_desc=f"Stage1 Epoch {epoch:02d}/{int(optimization['epochs']):02d} [test]",
+                progress_position=0,
+                leave_progress=True,
+            )
         current_lr = float(optimizer.param_groups[0]["lr"])
         row = {
             "epoch": epoch,
             "train_loss": float(train_loss),
             "val_loss": float(val_loss),
+            "test_loss": None if test_loss is None else float(test_loss),
             "lr": current_lr,
         }
         history_rows.append(row)
-        print(
+        message = (
             f"[stage1 epoch {epoch:02d}/{int(optimization['epochs']):02d}] "
-            f"train_loss={train_loss:.6f} val_loss={val_loss:.6f} lr={current_lr:.3e}"
+            f"train_loss={train_loss:.6f} val_loss={val_loss:.6f}"
         )
+        if test_loss is not None:
+            message += f" test_loss={test_loss:.6f}"
+        message += f" lr={current_lr:.3e}"
+        print(message)
+        metrics = {
+            "epoch": epoch,
+            "train/loss": train_loss,
+            "val/loss": val_loss,
+            "optimizer/lr": current_lr,
+        }
+        if test_loss is not None:
+            metrics["test/loss"] = test_loss
         log_metrics(
             wandb_run,
-            {
-                "epoch": epoch,
-                "train/loss": train_loss,
-                "val/loss": val_loss,
-                "optimizer/lr": current_lr,
-            },
+            metrics,
             step=epoch,
         )
 
@@ -279,6 +327,24 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             )
 
     save_history(history_rows, history_path)
+    final_test_loss = history_rows[-1].get("test_loss") if history_rows else None
+    save_checkpoint(
+        torch,
+        {
+            "stage": config["stage"],
+            "epoch": int(optimization["epochs"]),
+            "model_state": model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
+            "scheduler_state": scheduler.state_dict(),
+            "metrics": {
+                "best_val_loss": best_val_loss,
+                "best_epoch": best_epoch,
+                "final_test_loss": final_test_loss,
+            },
+            "config": config,
+        },
+        final_checkpoint_path,
+    )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state"])
@@ -296,11 +362,14 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     final_metrics = {
         "best_val_loss": best_val_loss,
         "best_epoch": float(best_epoch),
+        "final_test_loss": float(final_test_loss) if final_test_loss is not None else float("nan"),
         "total_params": float(count_parameters(model)),
         "trainable_params": float(count_parameters(model, trainable_only=True)),
     }
     log_metrics(wandb_run, final_metrics)
+    print(f"Saved initial checkpoint to {initial_checkpoint_path}")
     print(f"Saved checkpoint to {checkpoint_path}")
+    print(f"Saved final checkpoint to {final_checkpoint_path}")
     print(f"Saved history to {history_path}")
     print(f"Saved examples to {examples_path}")
     return final_metrics
