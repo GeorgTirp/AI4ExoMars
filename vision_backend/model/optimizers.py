@@ -24,6 +24,15 @@ from typing import Optional
 
 import torch
 
+# Parameter-name fragments that must never receive weight decay even though
+# they may be multi-dimensional (relative-position bias tables, GRN affine,
+# the SimMIM mask fill scalar). 1-D params (norms/biases) are excluded by shape.
+_NO_DECAY_NAME_FRAGMENTS = (
+    "relative_position_bias_table",
+    "mask_value",
+    ".grn.",
+)
+
 # Try importing Muon (optional dependency)
 try:
     from muon import Muon  # KellerJordan/Muon optimizer
@@ -181,5 +190,90 @@ def create_cosine_scheduler_with_warmup(
         progress = min(max(progress, 0.0), 1.0)
 
         return 0.5 * (1.0 + math.cos(math.pi * 2.0 * num_cycles * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+# ---------------------------------------------------------------------------
+# Stage-1 SimMIM: weight-decay param groups + optimizer + floored scheduler
+# ---------------------------------------------------------------------------
+def split_decay_param_groups(
+    model: torch.nn.Module,
+    weight_decay: float,
+) -> list[dict]:
+    """Two param groups: weight decay on >=2-D weights, none on the rest.
+
+    Excludes norms/biases (1-D), relative-position-bias tables, GRN affine
+    params, and the mask fill scalar from weight decay (§5).
+    """
+    decay: list[torch.nn.Parameter] = []
+    no_decay: list[torch.nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or any(frag in name for frag in _NO_DECAY_NAME_FRAGMENTS):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+def build_simmim_optimizer(
+    model: torch.nn.Module,
+    *,
+    lr: float,
+    weight_decay: float = 0.05,
+    betas: tuple[float, float] = (0.9, 0.999),
+    optimizer: str = "adamw",
+) -> torch.optim.Optimizer:
+    """AdamW (default) with WD param groups, or a Muon-hybrid behind a flag.
+
+    The Muon-hybrid path is best-effort: it requires the optional ``muon``
+    package and falls back to AdamW (with a warning) when it is unavailable.
+    """
+    param_groups = split_decay_param_groups(model, weight_decay)
+
+    if optimizer == "muon_hybrid":
+        if _HAS_MUON:
+            try:
+                print("[optimizers] Using Muon-hybrid (Muon on 2-D weights, AdamW elsewhere).")
+                param_groups[0]["use_muon"] = True
+                param_groups[1]["use_muon"] = False
+                return Muon(param_groups, lr=lr, betas=betas)  # type: ignore[arg-type]
+            except Exception as exc:  # pragma: no cover - depends on muon version
+                print(f"[optimizers] Muon-hybrid unavailable ({exc}); falling back to AdamW.")
+        else:
+            print("[optimizers] Muon requested but not installed; using AdamW.")
+
+    print("[optimizers] Using AdamW with weight-decay param groups.")
+    return torch.optim.AdamW(param_groups, lr=lr, betas=betas)
+
+
+def create_warmup_cosine_with_floor(
+    optimizer: torch.optim.Optimizer,
+    *,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    min_lr_ratio: float,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup then cosine decay from 1.0 down to ``min_lr_ratio``.
+
+    ``min_lr_ratio = min_lr / base_lr`` so the LR floors at ``min_lr`` instead
+    of decaying to zero.
+    """
+    min_lr_ratio = max(0.0, min(min_lr_ratio, 1.0))
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < num_warmup_steps:
+            return float(current_step) / max(1, num_warmup_steps)
+        progress = float(current_step - num_warmup_steps) / max(
+            1, num_training_steps - num_warmup_steps
+        )
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))  # 1 -> 0
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)

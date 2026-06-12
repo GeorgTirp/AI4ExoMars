@@ -21,7 +21,6 @@ By default patches are saved as ``.npy`` arrays to preserve source dtype.
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 import csv
 import fnmatch
@@ -82,7 +81,7 @@ class ImageProcessingResult:
     image_path: str
     manifest_path: str
     kept: int
-    skipped_black: int
+    skipped_invalid: int
 
 
 @dataclass(frozen=True)
@@ -293,41 +292,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--max-black-fraction",
+        "--max-invalid-fraction",
         type=float,
         default=0.01,
         help=(
             "Drop patches whose valid region contains more than this fraction "
-            "of black pixels. Set to a negative value to disable filtering."
-        ),
-    )
-    parser.add_argument(
-        "--max-border-black-fraction",
-        type=float,
-        default=0.01,
-        help=(
-            "Drop patches whose valid region contains more than this fraction "
-            "of black pixels connected to the patch border. Set to a "
-            "negative value to disable filtering."
-        ),
-    )
-    parser.add_argument(
-        "--max-context-border-black-fraction",
-        type=float,
-        default=0.01,
-        help=(
-            "Drop patches whose raw context crop contains more than this "
-            "fraction of border-connected black pixels. Set to a negative "
-            "value to disable filtering."
-        ),
-    )
-    parser.add_argument(
-        "--black-threshold",
-        type=float,
-        default=0.0,
-        help=(
-            "Pixels with value <= this threshold in every channel count as "
-            "black / missing image area."
+            "of invalid pixels. Invalid pixels are the saturation / NULL "
+            "markers that map to 0 (NULL / LRS / LIS) or 255 (HIS / HRS) in "
+            "the 8-bit encoding. Set to a negative value to disable filtering."
         ),
     )
     return parser.parse_args()
@@ -450,7 +422,7 @@ def preview_manifest_fieldnames() -> list[str]:
         "channels",
         "dtype",
         "pad_mode",
-        "black_fraction",
+        "invalid_fraction",
     ]
 
 
@@ -507,96 +479,55 @@ def save_preview_image(output_path: Path, patch) -> None:
     )
 
 
-def compute_black_fraction(array, black_threshold: float) -> float:
-    black_mask = compute_black_mask(array, black_threshold=black_threshold)
-    return float(black_mask.mean())
+def compute_invalid_fraction(array) -> float:
+    invalid_mask = compute_invalid_mask(array)
+    return float(invalid_mask.mean())
 
 
-def compute_black_mask(array, black_threshold: float):
+def _pixel_invalid(arr):
+    """Per-pixel (per-channel) invalid mask, keyed on the array's dtype.
+
+    HiRISE encodes NULL / saturation as special DN values that differ by bit
+    depth (see the PDS product summary):
+
+      * 8-bit  : 0 = NULL / LRS / LIS (black), 255 = HIS / HRS (white).
+      * 16-bit : NULL = 0 in the products we have. The signed 16-bit markers
+                 (-32768 NULL .. -32764 HRS) are NOT used by the current
+                 archive, so only 0 is treated as invalid here; add them to
+                 ``markers`` if a product using that convention appears.
+                 (Do NOT treat 255 as invalid -- it is a normal interior DN.)
+      * float  : NULL / saturation are -FLT_MAX (-3.40282e+38); also treat any
+                 non-finite value as invalid.
+    """
+    np = require_numpy()
+
+    if np.issubdtype(arr.dtype, np.floating):
+        return (~np.isfinite(arr)) | (arr <= -3.0e38)
+
+    itemsize = np.dtype(arr.dtype).itemsize
+    markers = (0, 255) if itemsize == 1 else (0,)
+    mask = np.zeros(arr.shape, dtype=bool)
+    for value in markers:
+        mask |= arr == value
+    return mask
+
+
+def compute_invalid_mask(array):
+    """Mark NULL / saturation pixels (dtype-aware, see :func:`_pixel_invalid`).
+
+    A pixel is invalid when it is invalid across every channel.
+    """
     np = require_numpy()
 
     arr = np.asarray(array)
     if arr.ndim == 2:
-        black_mask = arr <= black_threshold
+        invalid_mask = _pixel_invalid(arr)
     elif arr.ndim == 3:
-        black_mask = np.all(arr <= black_threshold, axis=2)
+        invalid_mask = np.all(_pixel_invalid(arr), axis=2)
     else:
         raise ValueError(f"Unexpected patch shape: {arr.shape}")
 
-    return black_mask
-
-
-def compute_border_connected_fraction_from_mask(black_mask) -> float:
-    np = require_numpy()
-
-    mask = np.asarray(black_mask, dtype=bool)
-    if mask.size == 0:
-        return 0.0
-
-    try:
-        from scipy import ndimage
-
-        border_seed = np.zeros_like(mask, dtype=bool)
-        border_seed[0, :] = mask[0, :]
-        border_seed[-1, :] = mask[-1, :]
-        border_seed[:, 0] |= mask[:, 0]
-        border_seed[:, -1] |= mask[:, -1]
-
-        if not border_seed.any():
-            return 0.0
-
-        connected = ndimage.binary_propagation(
-            border_seed,
-            structure=np.ones((3, 3), dtype=bool),
-            mask=mask,
-        )
-        return float(connected.mean())
-    except ModuleNotFoundError:
-        pass
-
-    if mask.size == 0:
-        return 0.0
-
-    height, width = mask.shape
-    visited = np.zeros_like(mask, dtype=bool)
-    queue: deque[tuple[int, int]] = deque()
-
-    def push(row: int, col: int) -> None:
-        if mask[row, col] and not visited[row, col]:
-            visited[row, col] = True
-            queue.append((row, col))
-
-    for col in range(width):
-        push(0, col)
-        push(height - 1, col)
-
-    for row in range(height):
-        push(row, 0)
-        push(row, width - 1)
-
-    neighbors = (
-        (-1, -1), (-1, 0), (-1, 1),
-        (0, -1),           (0, 1),
-        (1, -1),  (1, 0),  (1, 1),
-    )
-
-    while queue:
-        row, col = queue.popleft()
-        for d_row, d_col in neighbors:
-            next_row = row + d_row
-            next_col = col + d_col
-            if not (0 <= next_row < height and 0 <= next_col < width):
-                continue
-            if mask[next_row, next_col] and not visited[next_row, next_col]:
-                visited[next_row, next_col] = True
-                queue.append((next_row, next_col))
-
-    return float(visited.mean())
-
-
-def compute_border_connected_black_fraction(array, black_threshold: float) -> float:
-    black_mask = compute_black_mask(array, black_threshold=black_threshold)
-    return compute_border_connected_fraction_from_mask(black_mask)
+    return invalid_mask
 
 
 def _normalize_image_array(array):
@@ -657,26 +588,22 @@ def open_image_reader(path: Path) -> BaseImageReader:
     )
 
 
-def build_full_black_mask(
+def build_full_invalid_mask(
     reader: BaseImageReader,
     *,
-    black_threshold: float,
     stripe_height: int = DEFAULT_MASK_STRIPE_HEIGHT,
 ):
     np = require_numpy()
 
     stripe_height = max(1, min(int(stripe_height), reader.height))
-    black_mask = np.zeros((reader.height, reader.width), dtype=bool)
+    invalid_mask = np.zeros((reader.height, reader.width), dtype=bool)
 
     for top in range(0, reader.height, stripe_height):
         height = min(stripe_height, reader.height - top)
         stripe = reader.read_region(top, 0, height, reader.width)
-        black_mask[top : top + height, :] = compute_black_mask(
-            stripe,
-            black_threshold=black_threshold,
-        )
+        invalid_mask[top : top + height, :] = compute_invalid_mask(stripe)
 
-    return black_mask
+    return invalid_mask
 
 
 def maybe_build_integral_image(black_mask):
@@ -705,19 +632,19 @@ def query_integral_sum(integral, top: int, left: int, height: int, width: int) -
     return total
 
 
-def extract_black_mask_window(
-    black_mask,
+def extract_mask_window(
+    mask,
     *,
     top: int,
     left: int,
     height: int,
     width: int,
 ):
-    return black_mask[top : top + height, left : left + width]
+    return mask[top : top + height, left : left + width]
 
 
-def compute_black_fraction_from_mask_window(black_mask_window) -> float:
-    return float(black_mask_window.mean())
+def compute_fraction_from_mask_window(mask_window) -> float:
+    return float(mask_window.mean())
 
 
 def find_jp2_files(input_dir: Path, pattern: str, recursive: bool) -> list[Path]:
@@ -1154,7 +1081,7 @@ def manifest_fieldnames() -> list[str]:
         "context_pad_bottom",
         "context_pad_left",
         "context_pad_right",
-        "black_fraction",
+        "invalid_fraction",
     ]
 
 
@@ -1175,7 +1102,7 @@ def build_manifest_row(
     context_output_size: int,
     context_scale: int,
     context_spec: WindowSpec,
-    black_fraction: float,
+    invalid_fraction: float,
 ) -> dict[str, object]:
     encoded_patch_path = to_dataset_relative(patch_path, dataset_root)
     encoded_context_base = (
@@ -1224,7 +1151,7 @@ def build_manifest_row(
         "context_pad_bottom": context_spec.pad_bottom,
         "context_pad_left": context_spec.pad_left,
         "context_pad_right": context_spec.pad_right,
-        "black_fraction": black_fraction,
+        "invalid_fraction": invalid_fraction,
     }
 
 
@@ -1242,10 +1169,7 @@ def extract_patches_for_image(
     pad_mode: str,
     pad_value: float,
     num_examples: int,
-    max_black_fraction: float,
-    max_border_black_fraction: float,
-    max_context_border_black_fraction: float,
-    black_threshold: float,
+    max_invalid_fraction: float,
     overwrite: bool,
     dry_run: bool,
     max_patches_per_image: int,
@@ -1315,12 +1239,9 @@ def extract_patches_for_image(
 
         if dry_run:
             kept = 0
-            skipped_black = 0
-            full_black_mask = build_full_black_mask(
-                reader,
-                black_threshold=black_threshold,
-            )
-            black_integral = maybe_build_integral_image(full_black_mask)
+            skipped_invalid = 0
+            full_invalid_mask = build_full_invalid_mask(reader)
+            invalid_integral = maybe_build_integral_image(full_invalid_mask)
             progress = (
                 create_progress_bar(
                     total=len(specs),
@@ -1334,70 +1255,35 @@ def extract_patches_for_image(
             )
             try:
                 for spec in specs:
-                    local_black_mask = extract_black_mask_window(
-                        full_black_mask,
-                        top=spec.top,
-                        left=spec.left,
-                        height=spec.valid_height,
-                        width=spec.valid_width,
-                    )
-                    if black_integral is not None:
-                        local_black_count = query_integral_sum(
-                            black_integral,
+                    if invalid_integral is not None:
+                        local_invalid_count = query_integral_sum(
+                            invalid_integral,
                             spec.top,
                             spec.left,
                             spec.valid_height,
                             spec.valid_width,
                         )
-                        black_fraction = (
-                            local_black_count / float(spec.valid_height * spec.valid_width)
+                        invalid_fraction = (
+                            local_invalid_count
+                            / float(spec.valid_height * spec.valid_width)
                         )
                     else:
-                        black_fraction = compute_black_fraction_from_mask_window(
-                            local_black_mask
+                        local_invalid_mask = extract_mask_window(
+                            full_invalid_mask,
+                            top=spec.top,
+                            left=spec.left,
+                            height=spec.valid_height,
+                            width=spec.valid_width,
                         )
-                    border_black_fraction = compute_border_connected_fraction_from_mask(
-                        local_black_mask
-                    )
+                        invalid_fraction = compute_fraction_from_mask_window(
+                            local_invalid_mask
+                        )
 
                     if (
-                        max_black_fraction >= 0.0
-                        and black_fraction > max_black_fraction
-                    ) or (
-                        max_border_black_fraction >= 0.0
-                        and border_black_fraction > max_border_black_fraction
+                        max_invalid_fraction >= 0.0
+                        and invalid_fraction > max_invalid_fraction
                     ):
-                        skipped_black += 1
-                        note_progress()
-                        continue
-
-                    center_y = spec.top + patch_size // 2
-                    center_x = spec.left + patch_size // 2
-                    context_spec = make_context_window_spec(
-                        image_height=reader.height,
-                        image_width=reader.width,
-                        center_y=center_y,
-                        center_x=center_x,
-                        context_size=context_size,
-                    )
-                    context_black_mask = extract_black_mask_window(
-                        full_black_mask,
-                        top=context_spec.read_top,
-                        left=context_spec.read_left,
-                        height=context_spec.valid_height,
-                        width=context_spec.valid_width,
-                    )
-                    context_border_black_fraction = (
-                        compute_border_connected_fraction_from_mask(
-                            context_black_mask
-                        )
-                    )
-                    if (
-                        max_context_border_black_fraction >= 0.0
-                        and context_border_black_fraction
-                        > max_context_border_black_fraction
-                    ):
-                        skipped_black += 1
+                        skipped_invalid += 1
                     else:
                         kept += 1
 
@@ -1412,7 +1298,7 @@ def extract_patches_for_image(
                 f"{reader.height}x{reader.width}, "
                 f"{len(specs)} candidates, "
                 f"{kept} kept, "
-                f"{skipped_black} skipped, "
+                f"{skipped_invalid} skipped, "
                 f"{min(num_examples, kept)} examples, "
                 f"context_size={context_size} via {reader.backend}"
             )
@@ -1420,7 +1306,7 @@ def extract_patches_for_image(
                 image_path=str(image_path),
                 manifest_path=str(manifest_path),
                 kept=kept,
-                skipped_black=skipped_black,
+                skipped_invalid=skipped_invalid,
             )
 
         examples_dir = image_output_dir / EXAMPLES_DIRNAME
@@ -1443,18 +1329,15 @@ def extract_patches_for_image(
                 shared_context_base = build_shared_context_base(reader, context_scale)
                 save_patch(context_base_path, shared_context_base)
 
-        full_black_mask = build_full_black_mask(
-            reader,
-            black_threshold=black_threshold,
-        )
-        black_integral = maybe_build_integral_image(full_black_mask)
+        full_invalid_mask = build_full_invalid_mask(reader)
+        invalid_integral = maybe_build_integral_image(full_invalid_mask)
 
         with manifest_path.open("w", newline="") as manifest_file:
             manifest_writer = csv.DictWriter(manifest_file, fieldnames=fieldnames)
             manifest_writer.writeheader()
 
             written = 0
-            skipped_black = 0
+            skipped_invalid = 0
             kept_rows: list[dict[str, object]] = []
             progress = create_progress_bar(
                 total=len(specs),
@@ -1478,43 +1361,38 @@ def extract_patches_for_image(
                         if write_context_cache
                         else None
                     )
-                    local_black_mask = extract_black_mask_window(
-                        full_black_mask,
-                        top=spec.top,
-                        left=spec.left,
-                        height=spec.valid_height,
-                        width=spec.valid_width,
-                    )
-                    if black_integral is not None:
-                        local_black_count = query_integral_sum(
-                            black_integral,
+                    if invalid_integral is not None:
+                        local_invalid_count = query_integral_sum(
+                            invalid_integral,
                             spec.top,
                             spec.left,
                             spec.valid_height,
                             spec.valid_width,
                         )
-                        black_fraction = (
-                            local_black_count / float(spec.valid_height * spec.valid_width)
+                        invalid_fraction = (
+                            local_invalid_count
+                            / float(spec.valid_height * spec.valid_width)
                         )
                     else:
-                        black_fraction = compute_black_fraction_from_mask_window(
-                            local_black_mask
+                        local_invalid_mask = extract_mask_window(
+                            full_invalid_mask,
+                            top=spec.top,
+                            left=spec.left,
+                            height=spec.valid_height,
+                            width=spec.valid_width,
                         )
-                    border_black_fraction = compute_border_connected_fraction_from_mask(
-                        local_black_mask
-                    )
+                        invalid_fraction = compute_fraction_from_mask_window(
+                            local_invalid_mask
+                        )
 
                     if (
-                        max_black_fraction >= 0.0
-                        and black_fraction > max_black_fraction
-                    ) or (
-                        max_border_black_fraction >= 0.0
-                        and border_black_fraction > max_border_black_fraction
+                        max_invalid_fraction >= 0.0
+                        and invalid_fraction > max_invalid_fraction
                     ):
                         remove_if_exists(patch_path)
                         if context_cache_path is not None:
                             remove_if_exists(context_cache_path)
-                        skipped_black += 1
+                        skipped_invalid += 1
                         note_progress()
                         continue
 
@@ -1527,29 +1405,6 @@ def extract_patches_for_image(
                         center_x=center_x,
                         context_size=context_size,
                     )
-                    context_black_mask = extract_black_mask_window(
-                        full_black_mask,
-                        top=context_spec.read_top,
-                        left=context_spec.read_left,
-                        height=context_spec.valid_height,
-                        width=context_spec.valid_width,
-                    )
-                    context_border_black_fraction = (
-                        compute_border_connected_fraction_from_mask(
-                            context_black_mask
-                        )
-                    )
-                    if (
-                        max_context_border_black_fraction >= 0.0
-                        and context_border_black_fraction
-                        > max_context_border_black_fraction
-                    ):
-                        remove_if_exists(patch_path)
-                        if context_cache_path is not None:
-                            remove_if_exists(context_cache_path)
-                        skipped_black += 1
-                        note_progress()
-                        continue
 
                     patch = None
                     if overwrite or not patch_path.exists():
@@ -1611,7 +1466,7 @@ def extract_patches_for_image(
                         context_output_size=context_output_size,
                         context_scale=context_scale,
                         context_spec=context_spec,
-                        black_fraction=black_fraction,
+                        invalid_fraction=invalid_fraction,
                     )
                     manifest_writer.writerow(row)
                     kept_rows.append(row)
@@ -1673,14 +1528,14 @@ def extract_patches_for_image(
                             "channels": row["channels"],
                             "dtype": row["dtype"],
                             "pad_mode": row["pad_mode"],
-                            "black_fraction": row["black_fraction"],
+                            "invalid_fraction": row["invalid_fraction"],
                         }
                     )
                     saved_examples += 1
 
         print(
             f"[ok] {image_path.name}: kept {written} patches, skipped "
-            f"{skipped_black} black-border patches, "
+            f"{skipped_invalid} invalid (0/255) patches, "
             f"{'wrote shared context base, ' if write_shared_context_base else ''}"
             f"{'wrote paired context cache, ' if write_context_cache else ''}"
             f"and saved {saved_examples} previews to {image_output_dir}"
@@ -1689,7 +1544,7 @@ def extract_patches_for_image(
             image_path=str(image_path),
             manifest_path=str(manifest_path),
             kept=written,
-            skipped_black=skipped_black,
+            skipped_invalid=skipped_invalid,
         )
 
 
@@ -1707,10 +1562,7 @@ def process_image_worker(
     pad_mode: str,
     pad_value: float,
     num_examples: int,
-    max_black_fraction: float,
-    max_border_black_fraction: float,
-    max_context_border_black_fraction: float,
-    black_threshold: float,
+    max_invalid_fraction: float,
     overwrite: bool,
     dry_run: bool,
     max_patches_per_image: int,
@@ -1732,10 +1584,7 @@ def process_image_worker(
         pad_mode=pad_mode,
         pad_value=pad_value,
         num_examples=num_examples,
-        max_black_fraction=max_black_fraction,
-        max_border_black_fraction=max_border_black_fraction,
-        max_context_border_black_fraction=max_context_border_black_fraction,
-        black_threshold=black_threshold,
+        max_invalid_fraction=max_invalid_fraction,
         overwrite=overwrite,
         dry_run=dry_run,
         max_patches_per_image=max_patches_per_image,
@@ -1790,29 +1639,11 @@ def main() -> int:
         )
         return 1
 
-    if args.max_black_fraction > 1.0:
+    if args.max_invalid_fraction > 1.0:
         print(
-            "--max-black-fraction must be <= 1.0, or negative to disable.",
+            "--max-invalid-fraction must be <= 1.0, or negative to disable.",
             file=sys.stderr,
         )
-        return 1
-
-    if args.max_border_black_fraction > 1.0:
-        print(
-            "--max-border-black-fraction must be <= 1.0, or negative to disable.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if args.max_context_border_black_fraction > 1.0:
-        print(
-            "--max-context-border-black-fraction must be <= 1.0, or negative to disable.",
-            file=sys.stderr,
-        )
-        return 1
-
-    if args.black_threshold < 0.0:
-        print("--black-threshold must be non-negative.", file=sys.stderr)
         return 1
 
     stride = args.stride if args.stride is not None else args.patch_size
@@ -1920,10 +1751,7 @@ def main() -> int:
             "pad_mode": args.pad_mode,
             "pad_value": args.pad_value,
             "num_examples": args.num_examples,
-            "max_black_fraction": args.max_black_fraction,
-            "max_border_black_fraction": args.max_border_black_fraction,
-            "max_context_border_black_fraction": args.max_context_border_black_fraction,
-            "black_threshold": args.black_threshold,
+            "max_invalid_fraction": args.max_invalid_fraction,
             "overwrite": args.overwrite,
             "dry_run": args.dry_run,
             "max_patches_per_image": args.max_patches_per_image,
@@ -1970,7 +1798,7 @@ def main() -> int:
                     )
                     results_by_image[image_path] = result
                     total_patches += result.kept
-                    total_skipped += result.skipped_black
+                    total_skipped += result.skipped_invalid
                     if image_progress is not None:
                         image_progress.set_postfix(
                             {
@@ -2016,7 +1844,7 @@ def main() -> int:
                                 result = future.result()
                                 results_by_image[image_path] = result
                                 total_patches += result.kept
-                                total_skipped += result.skipped_black
+                                total_skipped += result.skipped_invalid
                                 if image_progress is not None:
                                     image_progress.set_postfix(
                                         {

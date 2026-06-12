@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         description="Stage 1: self-supervised teacher pretraining on paired HiRISE local/context crops."
     )
     parser.add_argument("--index-path", default="data/hirise_context_pairs/patch_index.csv")
-    parser.add_argument("--epochs", type=int, default=25)
+    parser.add_argument("--epochs", xtype=int, default=25)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument(

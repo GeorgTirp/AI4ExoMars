@@ -59,7 +59,7 @@ class PatchRecord:
     context_pad_bottom: int
     context_pad_left: int
     context_pad_right: int
-    black_fraction: float
+    invalid_fraction: float
 
 
 @dataclass
@@ -203,7 +203,11 @@ def load_patch_records(index_path: str | Path) -> list[PatchRecord]:
                     context_pad_bottom=_as_int(row["context_pad_bottom"]),
                     context_pad_left=_as_int(row["context_pad_left"]),
                     context_pad_right=_as_int(row["context_pad_right"]),
-                    black_fraction=_as_float(row["black_fraction"]),
+                    invalid_fraction=_as_float(
+                        row.get("invalid_fraction")
+                        or row.get("black_fraction")
+                        or "0.0"
+                    ),
                 )
             )
 
