@@ -1,156 +1,45 @@
 # optimizers.py
-"""Optimizer helpers for model training."""
+"""
+Optimizer helpers for model training.
+
+This module provides:
+
+1. **create_optimizer**  
+   Smart optimizer selection with priority:
+   - Muon (if installed and explicitly enabled),
+   - NAdam (PyTorch's NAdamW-like implementation),
+   - AdamW as a safe fallback.
+
+2. **create_cosine_scheduler_with_warmup**  
+   A cosine–annealing learning rate schedule with linear warmup,
+   mathematically equivalent to the Hugging Face transformers scheduler.
+
+Both utilities are framework-agnostic and work with any PyTorch model.
+"""
 
 from __future__ import annotations
 
 import math
-from typing import Iterable, Optional
+from typing import Optional
 
 import torch
 
-_MUON_NS_COEFFS = (3.4445, -4.7750, 2.0315)
+# Parameter-name fragments that must never receive weight decay even though
+# they may be multi-dimensional (relative-position bias tables, GRN affine,
+# the SimMIM mask fill scalar). 1-D params (norms/biases) are excluded by shape.
+_NO_DECAY_NAME_FRAGMENTS = (
+    "relative_position_bias_table",
+    "mask_value",
+    ".grn.",
+)
 
-
-def _orthogonalize_newton_schulz(
-    matrix: torch.Tensor,
-    *,
-    steps: int = 5,
-) -> torch.Tensor:
-    """Muon Newton-Schulz orthogonalization for a 2D update matrix."""
-    if matrix.ndim != 2:
-        raise ValueError("Muon orthogonalization expects a 2D tensor.")
-
-    original_dtype = matrix.dtype
-    compute_dtype = torch.bfloat16 if matrix.is_cuda else torch.float32
-    update = matrix.to(compute_dtype)
-    transposed = update.shape[0] > update.shape[1]
-    if transposed:
-        update = update.mT
-
-    update = update / (update.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-    a, b, c = _MUON_NS_COEFFS
-    for _ in range(steps):
-        gram = update @ update.mT
-        update = a * update + (b * gram + c * gram @ gram) @ update
-
-    if transposed:
-        update = update.mT
-    return update.to(original_dtype)
-
-
-def _muon_update(
-    grad: torch.Tensor,
-    momentum_buffer: torch.Tensor,
-    *,
-    momentum: float,
-    ns_steps: int,
-    nesterov: bool = True,
-) -> torch.Tensor:
-    momentum_buffer.lerp_(grad, 1.0 - momentum)
-    update = grad.lerp(momentum_buffer, momentum) if nesterov else momentum_buffer
-    update = _orthogonalize_newton_schulz(update, steps=ns_steps)
-    update = update * max(1.0, update.shape[0] / max(update.shape[1], 1)) ** 0.5
-    return update
-
-
-class MuonAdamW(torch.optim.Optimizer):
-    """Single-device Muon for 2D matrices plus AdamW for the remaining params.
-
-    The Muon update follows the KellerJordan/Muon optimizer design
-    (MIT License, Copyright (c) 2024 Keller Jordan):
-    https://github.com/KellerJordan/Muon
-    """
-
-    def __init__(
-        self,
-        param_groups: list[dict],
-        *,
-        muon_ns_steps: int = 5,
-    ):
-        if not param_groups:
-            raise ValueError("MuonAdamW requires at least one parameter group.")
-
-        defaults = {
-            "lr": 3e-4,
-            "weight_decay": 1e-2,
-            "use_muon": False,
-            "betas": (0.9, 0.95),
-            "eps": 1e-8,
-            "momentum": 0.95,
-            "muon_ns_steps": muon_ns_steps,
-        }
-        super().__init__(param_groups, defaults)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            lr = group["lr"]
-            weight_decay = group["weight_decay"]
-
-            if group.get("use_muon", False):
-                momentum = group["momentum"]
-                ns_steps = group["muon_ns_steps"]
-                for param in group["params"]:
-                    grad = param.grad
-                    if grad is None:
-                        continue
-                    if grad.ndim != 2:
-                        raise ValueError("Muon parameter groups may only contain 2D tensors.")
-
-                    state = self.state[param]
-                    if len(state) == 0:
-                        state["momentum_buffer"] = torch.zeros_like(param)
-
-                    update = _muon_update(
-                        grad,
-                        state["momentum_buffer"],
-                        momentum=momentum,
-                        ns_steps=ns_steps,
-                    )
-                    if weight_decay != 0:
-                        param.mul_(1.0 - lr * weight_decay)
-                    param.add_(update, alpha=-lr)
-                continue
-
-            beta1, beta2 = group["betas"]
-            eps = group["eps"]
-            for param in group["params"]:
-                grad = param.grad
-                if grad is None:
-                    continue
-
-                state = self.state[param]
-                if len(state) == 0:
-                    state["step"] = 0
-                    state["exp_avg"] = torch.zeros_like(param)
-                    state["exp_avg_sq"] = torch.zeros_like(param)
-
-                state["step"] += 1
-                exp_avg = state["exp_avg"]
-                exp_avg_sq = state["exp_avg_sq"]
-
-                if weight_decay != 0:
-                    param.mul_(1.0 - lr * weight_decay)
-
-                exp_avg.lerp_(grad, 1.0 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-
-                step = state["step"]
-                bias_correction1 = 1.0 - beta1**step
-                bias_correction2 = 1.0 - beta2**step
-                denom = exp_avg_sq.sqrt().div_(math.sqrt(bias_correction2)).add_(eps)
-                param.addcdiv_(exp_avg, denom, value=-lr / bias_correction1)
-
-        return loss
-
-
-def _numel(params: Iterable[torch.nn.Parameter]) -> int:
-    return sum(param.numel() for param in params)
+# Try importing Muon (optional dependency)
+try:
+    from muon import Muon  # KellerJordan/Muon optimizer
+    _HAS_MUON = True
+except Exception:
+    Muon = None  # type: ignore
+    _HAS_MUON = False
 
 
 # ---------------------------------------------------------------------------
@@ -162,61 +51,68 @@ def create_optimizer(
     weight_decay: float = 1e-2,
     use_muon: bool = True,
 ) -> torch.optim.Optimizer:
-    """Create AdamW, or Muon-on-2D-plus-AdamW for all other parameters."""
-    named_params = [
-        (name, param)
-        for name, param in model.named_parameters()
-        if param.requires_grad
-    ]
-    if not named_params:
-        raise ValueError("Model has no trainable parameters.")
+    r"""
+    Create an optimizer for a given model with prioritized fallback logic.
 
-    if not use_muon:
-        params = [param for _, param in named_params]
-        print(f"[optimizers] Using AdamW for {len(params)} tensors ({_numel(params):,} params).")
-        return torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+    The optimizers are tried in the following priority:
 
-    muon_params = [
-        param
-        for _, param in named_params
-        if param.ndim == 2
-    ]
-    adamw_params = [
-        param
-        for _, param in named_params
-        if param.ndim != 2
-    ]
+    1. **Muon** (if installed and ``use_muon=True``)  
+       Muon is a second-order optimizer approximating natural gradient steps.
 
-    param_groups: list[dict] = []
-    if muon_params:
-        param_groups.append(
-            {
-                "params": sorted(muon_params, key=lambda param: param.numel(), reverse=True),
-                "lr": lr,
-                "weight_decay": weight_decay,
-                "momentum": 0.95,
-                "muon_ns_steps": 5,
-                "use_muon": True,
-            }
+    2. **NAdam**  
+       PyTorch's NAdam implementation (NadamW-style), supporting weight decay.
+
+    3. **AdamW**  
+       Stable, widely used, standard fallback.
+
+    Parameters
+    ----------
+    model : torch.nn.Module
+        Model whose trainable parameters will be optimized.
+    lr : float, optional
+        Learning rate (default: ``3e-4``).
+    weight_decay : float, optional
+        Weight decay coefficient (default: ``1e-2``).
+    use_muon : bool, optional
+        Whether the user prefers to use Muon if available.
+
+    Returns
+    -------
+    torch.optim.Optimizer
+        Constructed optimizer instance.
+
+    Notes
+    -----
+    - Only parameters with ``requires_grad=True`` are passed to the optimizer.
+    - If Muon is requested but not installed, AdamW is used and a warning printed.
+    """
+    params_list = [p for p in model.parameters() if p.requires_grad]
+
+    # --------------------
+    # 1) Try Muon
+    # --------------------
+    if use_muon and _HAS_MUON:
+        print("[optimizers] Using Muon optimizer.")
+        return Muon(params_list, lr=lr, weight_decay=weight_decay)  # type: ignore
+
+    # --------------------
+    # 2) Try NAdam (NadamW-style)
+    # --------------------
+    if hasattr(torch.optim, "NAdam"):
+        print("[optimizers] Using NAdam (NadamW-style) optimizer.")
+        return torch.optim.NAdam(params_list, lr=lr, weight_decay=weight_decay)
+
+    # --------------------
+    # 3) Fallback: AdamW
+    # --------------------
+    if use_muon and not _HAS_MUON:
+        print(
+            "[optimizers] Muon requested but not installed.\n"
+            "Install via: pip install git+https://github.com/KellerJordan/Muon"
         )
-    if adamw_params:
-        param_groups.append(
-            {
-                "params": adamw_params,
-                "lr": lr,
-                "weight_decay": weight_decay,
-                "betas": (0.9, 0.95),
-                "eps": 1e-8,
-                "use_muon": False,
-            }
-        )
 
-    print(
-        "[optimizers] Using MuonAdamW: "
-        f"Muon handles {len(muon_params)} 2D tensors ({_numel(muon_params):,} params); "
-        f"AdamW handles {len(adamw_params)} other tensors ({_numel(adamw_params):,} params)."
-    )
-    return MuonAdamW(param_groups)
+    print("[optimizers] Using AdamW optimizer.")
+    return torch.optim.AdamW(params_list, lr=lr, weight_decay=weight_decay)
 
 
 # ---------------------------------------------------------------------------
@@ -294,5 +190,90 @@ def create_cosine_scheduler_with_warmup(
         progress = min(max(progress, 0.0), 1.0)
 
         return 0.5 * (1.0 + math.cos(math.pi * 2.0 * num_cycles * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+# ---------------------------------------------------------------------------
+# Stage-1 SimMIM: weight-decay param groups + optimizer + floored scheduler
+# ---------------------------------------------------------------------------
+def split_decay_param_groups(
+    model: torch.nn.Module,
+    weight_decay: float,
+) -> list[dict]:
+    """Two param groups: weight decay on >=2-D weights, none on the rest.
+
+    Excludes norms/biases (1-D), relative-position-bias tables, GRN affine
+    params, and the mask fill scalar from weight decay (§5).
+    """
+    decay: list[torch.nn.Parameter] = []
+    no_decay: list[torch.nn.Parameter] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or any(frag in name for frag in _NO_DECAY_NAME_FRAGMENTS):
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+def build_simmim_optimizer(
+    model: torch.nn.Module,
+    *,
+    lr: float,
+    weight_decay: float = 0.05,
+    betas: tuple[float, float] = (0.9, 0.999),
+    optimizer: str = "adamw",
+) -> torch.optim.Optimizer:
+    """AdamW (default) with WD param groups, or a Muon-hybrid behind a flag.
+
+    The Muon-hybrid path is best-effort: it requires the optional ``muon``
+    package and falls back to AdamW (with a warning) when it is unavailable.
+    """
+    param_groups = split_decay_param_groups(model, weight_decay)
+
+    if optimizer == "muon_hybrid":
+        if _HAS_MUON:
+            try:
+                print("[optimizers] Using Muon-hybrid (Muon on 2-D weights, AdamW elsewhere).")
+                param_groups[0]["use_muon"] = True
+                param_groups[1]["use_muon"] = False
+                return Muon(param_groups, lr=lr, betas=betas)  # type: ignore[arg-type]
+            except Exception as exc:  # pragma: no cover - depends on muon version
+                print(f"[optimizers] Muon-hybrid unavailable ({exc}); falling back to AdamW.")
+        else:
+            print("[optimizers] Muon requested but not installed; using AdamW.")
+
+    print("[optimizers] Using AdamW with weight-decay param groups.")
+    return torch.optim.AdamW(param_groups, lr=lr, betas=betas)
+
+
+def create_warmup_cosine_with_floor(
+    optimizer: torch.optim.Optimizer,
+    *,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    min_lr_ratio: float,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """Linear warmup then cosine decay from 1.0 down to ``min_lr_ratio``.
+
+    ``min_lr_ratio = min_lr / base_lr`` so the LR floors at ``min_lr`` instead
+    of decaying to zero.
+    """
+    min_lr_ratio = max(0.0, min(min_lr_ratio, 1.0))
+
+    def lr_lambda(current_step: int) -> float:
+        if current_step < num_warmup_steps:
+            return float(current_step) / max(1, num_warmup_steps)
+        progress = float(current_step - num_warmup_steps) / max(
+            1, num_training_steps - num_warmup_steps
+        )
+        progress = min(max(progress, 0.0), 1.0)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))  # 1 -> 0
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)

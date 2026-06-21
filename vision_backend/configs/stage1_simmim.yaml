@@ -1,0 +1,48 @@
+# Stage-1 SimMIM pretraining — single source of truth (parsed into Stage1Config).
+# Every value is a config key; override at launch with --set key=value.
+
+seed: 42
+precision: bf16          # bf16 | fp32
+deterministic: false     # true only for resume/overfit tests
+
+data:
+  index_path: data/hirise_simmim_crops/crops_index.csv
+  splits_path: null      # defaults to <index dir>/splits.json
+  batch_size: 8          # per-GPU; raise as VRAM allows at 1024²
+  num_workers: 8
+  persistent_workers: true
+  prefetch_factor: 2
+  augment: true          # horizontal + vertical flips only (no rotation)
+  crop_size: 1024
+
+model:
+  in_channels: 1
+  global_base_grid: 32   # = crop_size / 32 (S4 grid at train resolution)
+  window_size: 8
+  drop_path: 0.1
+  use_checkpoint: true    # grad checkpointing on S1–S3
+  mask_unit: 32
+  mask_ratio: 0.6
+  loss_type: l1          # l1 | mse | smooth_l1
+
+optim:
+  optimizer: adamw       # adamw | muon_hybrid
+  base_lr: 1.5e-4        # scaled by effective_batch / 256
+  min_lr: 1.0e-6
+  weight_decay: 0.05     # excluded from norms/biases/relpos/mask scalar
+  beta1: 0.9
+  beta2: 0.999
+  warmup_fraction: 0.05
+  effective_batch: 256   # per-GPU batch × grad accumulation
+  grad_clip: 1.0
+  total_steps: 200000
+  ema_decay: 0.9999
+
+output:
+  checkpoint_dir: checkpoints/stage1_simmim
+  run_name: stage1_simmim
+  checkpoint_every: 5000
+  val_every: 1000
+  panel_every: 2000
+  log_every: 50
+  num_panels: 8
