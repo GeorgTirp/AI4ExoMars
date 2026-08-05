@@ -1,0 +1,25 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = stage1_training_10ep.sh
+
+output = job_outputs/stage1_training/stage1_10ep.$(Cluster).$(Process).out
+error  = job_outputs/stage1_training/stage1_10ep.$(Cluster).$(Process).err
+log    = job_outputs/stage1_training/stage1_10ep.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+min_gpu_mem_mb = 24000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-stage1-muon-10ep"
+
+MaxTime = 129600
+
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+queue 1
