@@ -174,6 +174,8 @@ def parse_segmentation_batch(batch: Any) -> tuple[Any, Any, Optional[Any]]:
         target = batch.get("mask")
         if target is None:
             target = batch.get("target", batch.get("targets"))
+        if target is None:
+            target = batch.get("label", batch.get("labels"))
         context = batch.get("context")
         if local is None or target is None:
             raise KeyError("Segmentation batch dict must contain local/image and mask/target.")

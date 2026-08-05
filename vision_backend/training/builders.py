@@ -14,7 +14,12 @@ except ModuleNotFoundError:
         ContextAwareMaskedReconstructionPretrainer,
     )
 
-from .segmentation import ContextAwareSegmentationModel
+try:
+    from vision_backend.model.hybrid_encoder import STAGE_DIMS, HybridEncoder
+except ModuleNotFoundError:
+    from model.hybrid_encoder import STAGE_DIMS, HybridEncoder
+
+from .segmentation import ContextAwareSegmentationModel, SingleBranchSegmentationModel
 from .utils import extract_state_dict, load_checkpoint, load_prefixed_state_dict
 
 
@@ -76,6 +81,60 @@ def build_context_segmentation_model(model_config: dict[str, Any]) -> ContextAwa
         skip4_index=1,
         skip2_index=0,
     )
+
+
+def build_simmim_encoder(model_config: dict[str, Any]) -> HybridEncoder:
+    return HybridEncoder(
+        in_channels=model_config.get("in_channels", 1),
+        global_base_grid=model_config.get("global_base_grid", 32),
+        window_size=model_config.get("window_size", 8),
+        drop_path=model_config.get("drop_path", 0.0),
+        use_checkpoint=model_config.get("use_checkpoint", False),
+    )
+
+
+def build_simmim_segmentation_model(model_config: dict[str, Any]) -> SingleBranchSegmentationModel:
+    """Single-branch segmentation model on the SimMIM ``HybridEncoder``.
+
+    Skip / bottleneck channels are the encoder's frozen stage dims
+    (96, 192, 384, 768), so nothing needs hand-tuning to match the backbone.
+    """
+    encoder = build_simmim_encoder(model_config)
+    skip2_channels, skip4_channels, skip8_channels, bottleneck_channels = STAGE_DIMS
+    return SingleBranchSegmentationModel(
+        encoder=encoder,
+        num_classes=model_config["num_classes"],
+        bottleneck_channels=bottleneck_channels,
+        skip8_channels=skip8_channels,
+        skip4_channels=skip4_channels,
+        skip2_channels=skip2_channels,
+        decoder_channels=model_config.get("decoder_channels", 256),
+    )
+
+
+def load_simmim_encoder_checkpoint(
+    torch_module,
+    encoder_model,
+    checkpoint_path: Path,
+    *,
+    prefer_ema: bool = True,
+    strict: bool = True,
+) -> None:
+    """Load the pretrained ``HybridEncoder`` weights from a SimMIM checkpoint.
+
+    The SimMIM checkpoint stores the full model (encoder + masker + decoder)
+    under ``ema_state`` and ``model_state`` with an ``encoder.`` prefix; the EMA
+    weights are preferred for downstream use. The masker / reconstruction
+    decoder entries are dropped by the prefix filter.
+    """
+    # weights_only=False: the SimMIM checkpoint carries numpy RNG state; it is a
+    # first-party artifact, so unpickling it is safe.
+    checkpoint = torch_module.load(
+        str(checkpoint_path), map_location="cpu", weights_only=False
+    )
+    preferred = ("ema_state", "model_state") if prefer_ema else ("model_state", "ema_state")
+    state_dict = extract_state_dict(checkpoint, *preferred)
+    load_prefixed_state_dict(encoder_model, state_dict, prefix="encoder.", strict=strict)
 
 
 def load_encoder_from_pretrainer_checkpoint(

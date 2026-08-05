@@ -22,6 +22,7 @@ import json
 import os
 import random
 import sys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterator, Optional
@@ -229,6 +230,81 @@ def write_manifest(path: Path, records: list[CropRecord]) -> None:
             writer.writerow(asdict(record))
 
 
+def process_one(task: dict) -> dict:
+    """Process a single strip (one ProcessPool task): tile, filter, normalize,
+    write per-observation manifest + .npy crops. Returns picklable stats.
+    """
+    image_path = Path(task["image_path"])
+    output_dir = Path(task["output_dir"])
+    observation_id = image_path.stem
+    base = {
+        "observation_id": observation_id,
+        "gsd_key": "unknown",
+        "excluded": False,
+        "error": None,
+        "candidates": 0,
+        "kept": 0,
+        "rejected_invalid": 0,
+        "rejected_lowvar": 0,
+    }
+    try:
+        with open_image_reader(image_path) as reader:
+            gsd = detect_gsd(reader)
+            base["gsd_key"] = "unknown" if gsd is None else f"{gsd:.3f}"
+            if not gsd_matches(gsd, task["gsd"], task["gsd_tolerance"]):
+                base["excluded"] = True
+                return base
+            records, stats = process_observation(
+                reader,
+                observation_id,
+                source_rel=os.path.relpath(image_path, output_dir)
+                if not task["dry_run"]
+                else str(image_path),
+                output_dir=output_dir,
+                crop_size=task["crop_size"],
+                max_invalid_fraction=task["max_invalid_fraction"],
+                min_std=task["min_std"],
+                gsd=gsd if gsd is not None else -1.0,
+                dry_run=task["dry_run"],
+                overwrite=task["overwrite"],
+            )
+        if records and not task["dry_run"]:
+            write_manifest(output_dir / observation_id / MANIFEST_FILENAME, records)
+        base.update(stats)
+    except Exception as exc:  # keep the batch going if one strip fails
+        base["error"] = str(exc)
+    return base
+
+
+def rebuild_global_index(
+    output_dir: Path,
+    *,
+    val_fraction: float,
+    min_val: int,
+    seed: int,
+) -> tuple[int, int, dict]:
+    """Rebuild crops_index.csv + splits.json from ALL per-observation manifests
+    present in ``output_dir`` (so incremental batches accumulate)."""
+    manifests = sorted(output_dir.glob(f"*/{MANIFEST_FILENAME}"))
+    observation_ids: list[str] = []
+    total = 0
+    with (output_dir / INDEX_FILENAME).open("w", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=manifest_fieldnames())
+        writer.writeheader()
+        for manifest_path in manifests:
+            observation_ids.append(manifest_path.parent.name)
+            with manifest_path.open(newline="") as f:
+                for row in csv.DictReader(f):
+                    writer.writerow(row)
+                    total += 1
+    splits = split_by_observation(
+        observation_ids, val_fraction=val_fraction, min_val=min_val, seed=seed
+    )
+    with (output_dir / SPLITS_FILENAME).open("w") as f:
+        json.dump(splits, f, indent=2)
+    return total, len(observation_ids), splits
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", required=True, help="Directory of source .jp2 files.")
@@ -261,6 +337,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--start-index",
+        type=int,
+        default=0,
+        help="Index into the sorted strip list to start at (for batching).",
+    )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=None,
+        help="Process at most this many strips from --start-index (batch size).",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=1,
+        help="Strips to process in parallel (one process per strip).",
+    )
     return parser.parse_args()
 
 
@@ -272,75 +366,92 @@ def main() -> int:
         print(f"Input directory does not exist: {input_dir}", file=sys.stderr)
         return 1
 
-    images = find_jp2_files(input_dir, args.glob, args.recursive)
-    if not images:
+    all_images = find_jp2_files(input_dir, args.glob, args.recursive)
+    if not all_images:
         print(f"No JP2 images found in {input_dir} (glob {args.glob!r}).", file=sys.stderr)
+        return 1
+
+    start = max(0, args.start_index)
+    images = all_images[start:]
+    if args.max_images is not None and args.max_images >= 0:
+        images = images[: args.max_images]
+    if not images:
+        print(
+            f"No strips selected (have {len(all_images)}, --start-index {start}).",
+            file=sys.stderr,
+        )
         return 1
 
     if not args.dry_run:
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    all_records: list[CropRecord] = []
-    kept_observations: list[str] = []
-    gsd_counts: dict[str, int] = {}
-    excluded_gsd = 0
+    end = start + len(images)
+    print(
+        f"[prep] strips {start}..{end - 1} of {len(all_images)} "
+        f"({len(images)} this batch); workers={args.num_workers}; GSD policy: "
+        f"{'all' if args.gsd is None else f'{args.gsd} +/- {args.gsd_tolerance} m/px'}"
+    )
 
-    print(f"[prep] {len(images)} source image(s); GSD policy: "
-          f"{'all' if args.gsd is None else f'{args.gsd} +/- {args.gsd_tolerance} m/px'}")
+    tasks = [
+        {
+            "image_path": str(image_path),
+            "output_dir": str(output_dir),
+            "crop_size": args.crop_size,
+            "max_invalid_fraction": args.max_invalid_fraction,
+            "min_std": args.min_std,
+            "gsd": args.gsd,
+            "gsd_tolerance": args.gsd_tolerance,
+            "dry_run": args.dry_run,
+            "overwrite": args.overwrite,
+        }
+        for image_path in images
+    ]
 
-    for image_path in images:
-        observation_id = image_path.stem
-        with open_image_reader(image_path) as reader:
-            gsd = detect_gsd(reader)
-            key = "unknown" if gsd is None else f"{gsd:.3f}"
-            gsd_counts[key] = gsd_counts.get(key, 0) + 1
-
-            if not gsd_matches(gsd, args.gsd, args.gsd_tolerance):
-                excluded_gsd += 1
-                print(f"  - {observation_id}: excluded by GSD policy (gsd={key})")
-                continue
-
-            records, stats = process_observation(
-                reader,
-                observation_id,
-                source_rel=os.path.relpath(image_path, output_dir) if not args.dry_run else str(image_path),
-                output_dir=output_dir,
-                crop_size=args.crop_size,
-                max_invalid_fraction=args.max_invalid_fraction,
-                min_std=args.min_std,
-                gsd=gsd if gsd is not None else -1.0,
-                dry_run=args.dry_run,
-                overwrite=args.overwrite,
+    def report(r: dict) -> None:
+        if r["error"]:
+            print(f"  - {r['observation_id']}: ERROR {r['error']}")
+        elif r["excluded"]:
+            print(f"  - {r['observation_id']}: excluded by GSD policy (gsd={r['gsd_key']})")
+        else:
+            print(
+                f"  - {r['observation_id']}: {r['kept']}/{r['candidates']} kept "
+                f"(invalid {r['rejected_invalid']}, low-var {r['rejected_lowvar']}), gsd={r['gsd_key']}"
             )
 
-        if records:
-            kept_observations.append(observation_id)
-            all_records.extend(records)
-            if not args.dry_run:
-                write_manifest(output_dir / observation_id / MANIFEST_FILENAME, records)
-        print(
-            f"  - {observation_id}: {stats['kept']}/{stats['candidates']} kept "
-            f"(invalid {stats['rejected_invalid']}, low-var {stats['rejected_lowvar']}), gsd={key}"
-        )
+    results: list[dict] = []
+    if args.num_workers > 1 and len(tasks) > 1:
+        with ProcessPoolExecutor(max_workers=args.num_workers) as executor:
+            for r in executor.map(process_one, tasks):
+                results.append(r)
+                report(r)
+    else:
+        for task in tasks:
+            r = process_one(task)
+            results.append(r)
+            report(r)
 
-    print(f"[prep] GSD distribution: {gsd_counts}; excluded by policy: {excluded_gsd}")
-    print(f"[prep] Total kept crops: {len(all_records)} across {len(kept_observations)} observation(s).")
+    gsd_counts: dict[str, int] = {}
+    for r in results:
+        gsd_counts[r["gsd_key"]] = gsd_counts.get(r["gsd_key"], 0) + 1
+    excluded = sum(1 for r in results if r["excluded"])
+    errors = sum(1 for r in results if r["error"])
+    batch_kept = sum(r["kept"] for r in results)
+    print(f"[prep] GSD distribution: {gsd_counts}; excluded by policy: {excluded}; errors: {errors}")
+    print(f"[prep] This batch: {batch_kept} crops across {len(results)} strip(s).")
 
     if args.dry_run:
         return 0
 
-    write_manifest(output_dir / INDEX_FILENAME, all_records)
-    splits = split_by_observation(
-        kept_observations,
+    total, n_obs, splits = rebuild_global_index(
+        output_dir,
         val_fraction=args.val_fraction,
         min_val=args.min_val_observations,
         seed=args.seed,
     )
-    with (output_dir / SPLITS_FILENAME).open("w") as f:
-        json.dump(splits, f, indent=2)
     print(
-        f"[prep] Wrote {INDEX_FILENAME}, {SPLITS_FILENAME} "
-        f"(train {len(splits['train'])} / val {len(splits['val'])} observations) to {output_dir}"
+        f"[prep] Rebuilt {INDEX_FILENAME} + {SPLITS_FILENAME} (cumulative): "
+        f"{total} crops across {n_obs} observation(s); "
+        f"train {len(splits['train'])} / val {len(splits['val'])}."
     )
     return 0
 

@@ -85,6 +85,48 @@ class LightweightSegmentationDecoder(nn.Module):
         return self.head(x)
 
 
+class SingleBranchSegmentationModel(nn.Module):
+    """Segmentation head on the single-branch SimMIM ``HybridEncoder``.
+
+    The encoder takes one image and returns a dict of multi-scale feature maps
+    ``{s1: /4, s2: /8, s3: /16, s4: /32}``; those feed the same encoder-agnostic
+    ``LightweightSegmentationDecoder`` used by the context model. The SimMIM
+    reconstruction head is discarded -- only the pretrained encoder is reused.
+    """
+
+    def __init__(
+        self,
+        *,
+        encoder: nn.Module,
+        num_classes: int,
+        bottleneck_channels: int,
+        skip8_channels: int,
+        skip4_channels: int,
+        skip2_channels: int,
+        decoder_channels: int = 256,
+    ):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = LightweightSegmentationDecoder(
+            bottleneck_channels=bottleneck_channels,
+            skip8_channels=skip8_channels,
+            skip4_channels=skip4_channels,
+            skip2_channels=skip2_channels,
+            decoder_channels=decoder_channels,
+            num_classes=num_classes,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        features = self.encoder(x)
+        return self.decoder(
+            bottleneck=features["s4"],
+            skip8=features["s3"],
+            skip4=features["s2"],
+            skip2=features["s1"],
+            output_size=x.shape[2:],
+        )
+
+
 class ContextAwareSegmentationModel(nn.Module):
     def __init__(
         self,

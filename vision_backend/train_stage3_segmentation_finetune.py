@@ -28,14 +28,23 @@ def parse_args() -> argparse.Namespace:
         description="Stage 3: supervised segmentation fine-tuning of the distilled encoder."
     )
     parser.add_argument(
+        "--model-kind",
+        choices=("simmim", "context"),
+        default="simmim",
+        help="Encoder to fine-tune: 'simmim' single-branch HybridEncoder "
+             "(default) or the legacy two-branch 'context' model.",
+    )
+    parser.add_argument(
         "--loader-factory",
-        default="martian_terrain_segmentation.dataloader:create_ai4mars_dataloaders",
-        help="Import path to a loader factory returning train/val/test loaders.",
+        default="seg_dataset:create_segmentation_dataloaders",
+        help="Import path to a loader factory returning train/val loaders. "
+             "Default = NOAH-H paired (imagery, class-label) crops.",
     )
     parser.add_argument(
         "--loader-config-path",
         default=None,
-        help="Optional JSON config file forwarded to the loader factory.",
+        help="JSON config forwarded to the loader factory (for the default "
+             "NOAH-H loader: manifest_path, imagery_path, label_path, num_classes).",
     )
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -44,10 +53,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
     parser.add_argument("--num-classes", type=int, default=None)
-    parser.add_argument("--ignore-index", type=int, default=-100)
+    parser.add_argument("--ignore-index", type=int, default=255,
+                        help="Label id excluded from loss/metrics (NOAH-H "
+                             "nodata/boundary = 255).")
     parser.add_argument("--freeze-encoder-epochs", type=int, default=5)
     parser.add_argument("--encoder-checkpoint", required=True)
     parser.add_argument("--strict-checkpoint-load", action="store_true")
+    # simmim (single-branch HybridEncoder) hyperparameters
+    parser.add_argument("--global-base-grid", type=int, default=32)
+    # legacy context-model hyperparameters (only used with --model-kind context)
     parser.add_argument("--local-base-channels", type=int, default=32)
     parser.add_argument("--context-base-channels", type=int, default=16)
     parser.add_argument("--context-dim", type=int, default=192)
@@ -90,13 +104,17 @@ def build_config(args: argparse.Namespace) -> dict:
             "ignore_index": args.ignore_index,
         },
         "model": {
+            "model_kind": args.model_kind,
             "in_channels": 1,
-            "local_base_channels": args.local_base_channels,
-            "context_base_channels": args.context_base_channels,
-            "context_dim": args.context_dim,
             "decoder_channels": args.decoder_channels,
             "window_size": args.window_size,
             "drop_path": args.drop_path,
+            # simmim single-branch
+            "global_base_grid": args.global_base_grid,
+            # legacy context two-branch (ignored when model_kind == 'simmim')
+            "local_base_channels": args.local_base_channels,
+            "context_base_channels": args.context_base_channels,
+            "context_dim": args.context_dim,
             "swin_depths": tuple(args.swin_depths),
             "swin_num_heads": tuple(args.swin_num_heads),
             "use_stage32": not args.disable_stage32,
@@ -123,6 +141,10 @@ def build_config(args: argparse.Namespace) -> dict:
 def _load_loader_kwargs(config_path: str | None) -> dict:
     if config_path is None:
         return {}
+    try:
+        from vision_backend.training.utils import resolve_path
+    except ModuleNotFoundError:
+        from training.utils import resolve_path
     path = resolve_path(config_path)
     loaded = json.loads(path.read_text())
     if not isinstance(loaded, dict):
@@ -139,7 +161,9 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         )
         from vision_backend.training.builders import (
             build_context_segmentation_model,
+            build_simmim_segmentation_model,
             load_encoder_from_pretrainer_checkpoint,
+            load_simmim_encoder_checkpoint,
         )
         from vision_backend.training.utils import (
             count_parameters,
@@ -160,7 +184,9 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         )
         from training.builders import (
             build_context_segmentation_model,
+            build_simmim_segmentation_model,
             load_encoder_from_pretrainer_checkpoint,
+            load_simmim_encoder_checkpoint,
         )
         from training.utils import (
             count_parameters,
@@ -206,13 +232,22 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         )
     model_config["num_classes"] = int(num_classes)
 
-    model = build_context_segmentation_model(model_config).to(device)
-    load_encoder_from_pretrainer_checkpoint(
-        torch,
-        model.encoder,
-        resolve_path(initialization["encoder_checkpoint"]),
-        strict=bool(initialization["strict_checkpoint_load"]),
-    )
+    model_kind = model_config.get("model_kind", "simmim")
+    encoder_ckpt = resolve_path(initialization["encoder_checkpoint"])
+    strict = bool(initialization["strict_checkpoint_load"])
+    if model_kind == "simmim":
+        model = build_simmim_segmentation_model(model_config).to(device)
+        load_simmim_encoder_checkpoint(
+            torch, model.encoder, encoder_ckpt, prefer_ema=True, strict=strict
+        )
+    elif model_kind == "context":
+        model = build_context_segmentation_model(model_config).to(device)
+        load_encoder_from_pretrainer_checkpoint(
+            torch, model.encoder, encoder_ckpt, strict=strict
+        )
+    else:
+        raise ValueError(f"Unknown model_kind: {model_kind!r} (expected simmim|context).")
+    print(f"Model kind: {model_kind}")
 
     optimizer = create_optimizer(
         model,
