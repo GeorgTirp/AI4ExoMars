@@ -32,7 +32,7 @@ try:
         create_warmup_cosine_with_floor,
     )
     from vision_backend.simmim_dataset import ResumableLoader, create_simmim_dataloaders
-    from vision_backend.training.config import Stage1Config, load_config
+    from vision_backend.training.config import Stage1Config, config_from_dict, load_config
     from vision_backend.training.ema import ModelEMA
     from vision_backend.training.utils import (
         count_parameters,
@@ -46,13 +46,16 @@ try:
         finish_wandb_run,
         init_wandb_run,
         log_metrics,
+        maybe_run_sweep,
+        merge_wandb_config,
+        validate_wandb_args,
     )
 except ModuleNotFoundError:  # running as a script from inside vision_backend/
     from model.hybrid_encoder import HybridEncoder
     from model.simmim import SimMIMModel
     from model.optimizers import build_simmim_optimizer, create_warmup_cosine_with_floor
     from simmim_dataset import ResumableLoader, create_simmim_dataloaders
-    from training.config import Stage1Config, load_config
+    from training.config import Stage1Config, config_from_dict, load_config
     from training.ema import ModelEMA
     from training.utils import (
         count_parameters,
@@ -66,6 +69,9 @@ except ModuleNotFoundError:  # running as a script from inside vision_backend/
         finish_wandb_run,
         init_wandb_run,
         log_metrics,
+        maybe_run_sweep,
+        merge_wandb_config,
+        validate_wandb_args,
     )
 
 
@@ -150,8 +156,9 @@ def build_panels(eval_model: nn.Module, crops: torch.Tensor, masks: torch.Tensor
     panels = []
     try:
         import wandb
-    except ModuleNotFoundError:
-        return panels
+    except ModuleNotFoundError as exc:
+        # reachable only when a run is active, i.e. wandb was importable at init
+        raise ModuleNotFoundError("wandb vanished mid-run; cannot log panels.") from exc
     for i in range(x.size(0)):
         triplet = np.concatenate(
             [
@@ -232,7 +239,13 @@ def save_encoder_only(path: Path, ema: ModelEMA, cfg) -> None:
 # ---------------------------------------------------------------------------
 # Training
 # ---------------------------------------------------------------------------
-def train(cfg: Stage1Config, args, *, max_steps: int | None = None) -> dict:
+def train(
+    cfg: Stage1Config,
+    args,
+    *,
+    max_steps: int | None = None,
+    wandb_run=None,
+) -> dict:
     set_seed(torch, cfg.seed)
     configure_determinism(cfg.deterministic)
     # deterministic test mode runs on CPU for bitwise-reproducible resume
@@ -293,10 +306,28 @@ def train(cfg: Stage1Config, args, *, max_steps: int | None = None) -> dict:
         global_step = int(ckpt["step"])
         print(f"[stage1] resumed from {args.resume} at step {global_step}")
 
-    run = init_wandb_run(args, cfg.to_dict(), stage_name="stage1_simmim") if not args.no_wandb else None
+    # In sweep mode the agent owns the run (already initialized with the sampled
+    # params); standalone runs create their own.
+    owns_run = wandb_run is None
+    run = wandb_run
+    if owns_run and not args.no_wandb:
+        run = init_wandb_run(args, cfg.to_dict(), stage_name="stage1_simmim")
 
     checkpoint_dir = resolve_path(cfg.output.checkpoint_dir)
+    if run is not None and not owns_run:
+        # one dir per trial -- concurrent agents would otherwise clobber last.pt
+        checkpoint_dir = checkpoint_dir / f"run_{run.id}"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[stage1] checkpoint_dir={checkpoint_dir}")
+
+    if not owns_run and loaders.val is None:
+        # sweeps optimize val/loss; with no val split the metric is never logged
+        # and every trial would look equally (un)good to the bayes optimizer.
+        raise RuntimeError(
+            "Sweep trial has no validation split, so the sweep metric 'val/loss' "
+            "would never be logged. Rebuild the crop index with a non-empty val "
+            "set (prep_crops --val-fraction/--min-val-observations)."
+        )
 
     # fixed val crops + masks for reproducible monitoring panels
     panel_crops = panel_masks = None
@@ -359,7 +390,8 @@ def train(cfg: Stage1Config, args, *, max_steps: int | None = None) -> dict:
             save_encoder_only(checkpoint_dir / "encoder_only.pt", ema, cfg)
             print(f"[stage1] checkpoint @ step {global_step} -> {checkpoint_dir}")
 
-    finish_wandb_run(run)
+    if owns_run:
+        finish_wandb_run(run)  # in sweep mode the agent closes the run
     print(f"[stage1] done at step {global_step}.")
     return {"final_step": global_step, "history": history}
 
@@ -391,6 +423,9 @@ def _coerce(value: str):
 
 def main() -> int:
     args = parse_args()
+    # fail before any expensive setup if the wandb/sweep flags are inconsistent
+    validate_wandb_args(args)
+
     overrides = {}
     for item in args.set:
         if "=" not in item:
@@ -398,6 +433,20 @@ def main() -> int:
         key, value = item.split("=", 1)
         overrides[key] = _coerce(value)
     cfg = load_config(args.config, overrides=overrides or None)
+
+    def _train_from_dict(config_dict: dict, run=None) -> dict:
+        # sweep params arrive as dotted keys already merged into config_dict;
+        # config_from_dict rejects unknown keys loudly rather than ignoring them
+        return train(config_from_dict(config_dict), args, wandb_run=run)
+
+    if maybe_run_sweep(
+        args,
+        stage_name="stage1_simmim",
+        base_config=cfg.to_dict(),
+        train_fn=_train_from_dict,
+    ):
+        return 0
+
     train(cfg, args)
     return 0
 

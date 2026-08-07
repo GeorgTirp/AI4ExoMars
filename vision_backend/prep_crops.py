@@ -307,9 +307,11 @@ def rebuild_global_index(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", required=True, help="Directory of source .jp2 files.")
+    parser.add_argument(
+        "--input-dir", required=True, help="Directory of source rasters (.jp2 / .tif)."
+    )
     parser.add_argument("--output-dir", required=True, help="Destination for crops + manifest.")
-    parser.add_argument("--glob", default="*.jp2")
+    parser.add_argument("--glob", default="*.jp2", help="Filename glob, e.g. '*.tif' for NOAH DRG tiles.")
     parser.add_argument("--recursive", action="store_true")
     parser.add_argument("--crop-size", type=int, default=CROP_SIZE)
     parser.add_argument(
@@ -368,7 +370,12 @@ def main() -> int:
 
     all_images = find_jp2_files(input_dir, args.glob, args.recursive)
     if not all_images:
-        print(f"No JP2 images found in {input_dir} (glob {args.glob!r}).", file=sys.stderr)
+        print(
+            f"No raster images found in {input_dir} (glob {args.glob!r}). "
+            f"Recognized suffixes: .jp2 .tif .tiff .vrt; pass --recursive if the "
+            f"rasters sit in subdirectories.",
+            file=sys.stderr,
+        )
         return 1
 
     start = max(0, args.start_index)

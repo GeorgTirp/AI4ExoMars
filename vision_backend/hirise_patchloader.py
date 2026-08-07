@@ -647,7 +647,16 @@ def compute_fraction_from_mask_window(mask_window) -> float:
     return float(mask_window.mean())
 
 
+RASTER_SUFFIXES = (".jp2", ".tif", ".tiff", ".vrt")
+
+
 def find_jp2_files(input_dir: Path, pattern: str, recursive: bool) -> list[Path]:
+    """Raster sources matching ``pattern``.
+
+    Historically JP2-only (HiRISE RDR strips); GeoTIFF is accepted too so the
+    NOAH-H DRG mosaic tiles can be cropped by the same path. ``pattern`` still
+    decides which of those are picked up (e.g. ``*.tif``).
+    """
     iterator: Iterable[Path]
     if recursive:
         iterator = input_dir.rglob("*")
@@ -658,7 +667,7 @@ def find_jp2_files(input_dir: Path, pattern: str, recursive: bool) -> list[Path]
         path
         for path in iterator
         if path.is_file()
-        and path.suffix.lower() == ".jp2"
+        and path.suffix.lower() in RASTER_SUFFIXES
         and fnmatch.fnmatch(path.name.lower(), pattern.lower())
     ]
     return sorted(files)

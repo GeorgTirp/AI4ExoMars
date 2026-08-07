@@ -72,6 +72,58 @@ def _import_wandb():
     return wandb
 
 
+class SweepConfigurationError(RuntimeError):
+    """Raised when sweep flags are inconsistent — never swallowed."""
+
+
+def sweep_requested(args) -> bool:
+    return bool(getattr(args, "wandb_sweep_config", None) or getattr(args, "wandb_sweep_id", None))
+
+
+def validate_wandb_args(args) -> None:
+    """Reject flag combinations that would silently degrade to a non-sweep run.
+
+    The failure mode this guards against: ``--wandb-sweep-id`` is accepted by the
+    parser, so a launcher that forgets ``--wandb`` (or passes ``--no-wandb``, or
+    an empty ``$SWEEP_ID``) would train exactly one run at the YAML defaults and
+    report success. Every case below is fatal instead.
+    """
+    if not sweep_requested(args):
+        if getattr(args, "wandb_sweep_count", None) is not None:
+            raise SweepConfigurationError(
+                "--wandb-sweep-count was given without --wandb-sweep-id/"
+                "--wandb-sweep-config; this would run a single ordinary run."
+            )
+        return
+
+    if getattr(args, "no_wandb", False):
+        raise SweepConfigurationError("--no-wandb cannot be combined with sweep mode.")
+    if not getattr(args, "wandb", False):
+        raise SweepConfigurationError(
+            "Sweep mode requires --wandb. Without it the sweep flags are inert "
+            "and you would get one run at the config defaults."
+        )
+    if getattr(args, "wandb_mode", "online") != "online":
+        raise SweepConfigurationError(
+            f"Sweep mode requires --wandb-mode online (got "
+            f"{getattr(args, 'wandb_mode', None)!r}); an agent cannot receive "
+            f"hyperparameters from the sweep server otherwise."
+        )
+    if args.wandb_sweep_config and args.wandb_sweep_id:
+        raise SweepConfigurationError(
+            "Pass either --wandb-sweep-config (create a sweep) or "
+            "--wandb-sweep-id (join one), not both."
+        )
+    if args.wandb_sweep_config:
+        path = Path(args.wandb_sweep_config).expanduser()
+        if not path.is_file():
+            raise SweepConfigurationError(f"Sweep config not found: {path}")
+    if args.wandb_sweep_id is not None and not args.wandb_sweep_id.strip():
+        raise SweepConfigurationError(
+            "--wandb-sweep-id is empty (an unset $SWEEP_ID in the launcher?)."
+        )
+
+
 def _load_sweep_config(path: Path) -> dict[str, Any]:
     text = path.read_text()
     if path.suffix.lower() == ".json":
@@ -132,13 +184,11 @@ def maybe_run_sweep(
     base_config: dict[str, Any],
     train_fn: Callable[[dict[str, Any], Any], dict[str, Any]],
 ) -> bool:
-    if not args.wandb_sweep_config and not args.wandb_sweep_id:
+    validate_wandb_args(args)
+    if not sweep_requested(args):
         return False
 
     wandb = _import_wandb()
-
-    if not args.wandb:
-        raise ValueError("Use `--wandb` together with sweep mode.")
 
     if args.wandb_sweep_id is not None:
         sweep_id = args.wandb_sweep_id
@@ -151,7 +201,17 @@ def maybe_run_sweep(
             entity=args.wandb_entity,
         )
 
+    print(f"[sweep] stage={stage_name} sweep_id={sweep_id} "
+          f"project={args.wandb_project} entity={args.wandb_entity or '<default>'} "
+          f"count={args.wandb_sweep_count if args.wandb_sweep_count is not None else 'unbounded'}",
+          flush=True)
+
+    tally = {"started": 0, "completed": 0}
+    first_error: list[BaseException] = []
+
     def _agent_main():
+        tally["started"] += 1
+        trial = tally["started"]
         run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
@@ -161,8 +221,25 @@ def maybe_run_sweep(
             mode=args.wandb_mode,
         )
         try:
+            sampled = dict(run.config)
+            print(f"[sweep] trial {trial} run={run.id} url={run.url}", flush=True)
+            print(f"[sweep] trial {trial} sampled params: {sampled}", flush=True)
+            if not sampled:
+                raise SweepConfigurationError(
+                    f"Sweep trial {trial} received an EMPTY parameter set from the "
+                    f"sweep server. The agent is not actually tuning anything — "
+                    f"check that sweep {sweep_id} exists and its `parameters` block "
+                    f"is non-empty."
+                )
             merged_config = merge_wandb_config(base_config, run)
             train_fn(merged_config, run)
+            tally["completed"] += 1
+            print(f"[sweep] trial {trial} completed ({tally['completed']}/{trial} ok)", flush=True)
+        except BaseException as exc:  # record, then let wandb mark the run crashed
+            if not first_error:
+                first_error.append(exc)
+            print(f"[sweep] trial {trial} FAILED: {type(exc).__name__}: {exc}", flush=True)
+            raise
         finally:
             finish_wandb_run(run)
 
@@ -173,4 +250,21 @@ def maybe_run_sweep(
         project=args.wandb_project,
         entity=args.wandb_entity,
     )
+
+    # wandb.agent swallows per-trial exceptions and returns normally, so an agent
+    # whose every trial died would otherwise exit 0 and look like a clean run.
+    if tally["started"] == 0:
+        raise SweepConfigurationError(
+            f"Sweep agent for {sweep_id} exited without starting a single trial. "
+            f"The sweep is likely already finished/cancelled, or the id belongs to "
+            f"another project/entity."
+        )
+    if tally["completed"] == 0:
+        raise SweepConfigurationError(
+            f"All {tally['started']} sweep trial(s) failed for {sweep_id}. "
+            f"First error was {type(first_error[0]).__name__}: {first_error[0]}"
+        ) from (first_error[0] if first_error else None)
+
+    print(f"[sweep] agent done: {tally['completed']}/{tally['started']} trial(s) completed.",
+          flush=True)
     return True
