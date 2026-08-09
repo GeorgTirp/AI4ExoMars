@@ -14,9 +14,14 @@ set -euo pipefail
 #          --crop-size 512 --min-label-frac 0.5 --val-fraction 0.15 \
 #          --out data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_crops_DC_full.csv
 #   3. Write the loader config JSON (server paths) at $LOADER_CONFIG (see below).
-#   4. Create the sweep and export its id + your key, then submit:
+#   4. Create the sweep IN THE SAME project/entity the agents log to
+#      (the sweep JSON has no project key, and 'wandb sweep' ignores the
+#      training script's --wandb-project, so pass -p/-e here or the sweep and
+#      its runs land in different projects and Bayes can't read val/miou):
 #        export WANDB_API_KEY=...
-#        export SWEEP_ID=$(wandb sweep vision_backend/training/sweeps/stage3_segmentation_finetune.json 2>&1 | awk '/Creating sweep with ID/{print $NF}')
+#        export SWEEP_ID=$(wandb sweep -p ai4exomars -e geotir-university-of-t-bingen \
+#            vision_backend/training/sweeps/stage3_segmentation_finetune.json 2>&1 \
+#            | awk '/Creating sweep with ID/{print $NF}')
 #        condor_submit stage3_seg_noah_sweep.sub
 # ---------------------------------------------------------------------------
 
