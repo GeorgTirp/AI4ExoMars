@@ -1,0 +1,34 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = stage3_seg_noah_sweep.sh
+
+output = job_outputs/stage3_seg_noah_sweep/agent.$(Cluster).$(Process).out
+error  = job_outputs/stage3_seg_noah_sweep/agent.$(Cluster).$(Process).err
+log    = job_outputs/stage3_seg_noah_sweep/agent.$(Cluster).log
+
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+min_gpu_mem_mb = 24000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+# SWEEP_ID and WANDB_API_KEY come from the submitting shell via getenv.
+# SWEEP_COUNT = trials per agent; 4 agents x 4 trials = 16 trials total.
+getenv = True
+environment = "SWEEP_COUNT=4"
+
++JobBatchName = "ai4exomars-stage3-seg-noah-sweep"
+
+MaxTime = 129600
+
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+# A crashed agent means the sweep is misconfigured -- surface it, do not retry
+# silently into a fresh trial budget.
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Sweep agent exited non-zero -- check the .err log"
+
+# 4 parallel agents attached to the same sweep id
+queue 4
