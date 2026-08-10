@@ -49,9 +49,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=50)
-    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--learning-rate", type=float, default=3e-4,
+                        help="LR for the single-optimizer path (use_muon off).")
     parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--warmup-fraction", type=float, default=0.1)
+    # Routed Muon(2-D weights)+NAdam(rest) path -- active with --use-muon.
+    # Muon and NAdam get independent LRs and momenta so the sweep can tune each.
+    parser.add_argument("--muon-lr", type=float, default=2e-2)
+    parser.add_argument("--muon-momentum", type=float, default=0.95)
+    parser.add_argument("--muon-weight-decay", type=float, default=1e-2)
+    parser.add_argument("--nadam-lr", type=float, default=3e-4)
+    parser.add_argument("--nadam-beta1", type=float, default=0.9)
+    parser.add_argument("--nadam-beta2", type=float, default=0.999)
     parser.add_argument("--num-classes", type=int, default=None)
     parser.add_argument("--ignore-index", type=int, default=255,
                         help="Label id excluded from loss/metrics (NOAH-H "
@@ -130,6 +139,12 @@ def build_config(args: argparse.Namespace) -> dict:
             "weight_decay": args.weight_decay,
             "warmup_fraction": args.warmup_fraction,
             "use_muon": args.use_muon,
+            "muon_lr": args.muon_lr,
+            "muon_momentum": args.muon_momentum,
+            "muon_weight_decay": args.muon_weight_decay,
+            "nadam_lr": args.nadam_lr,
+            "nadam_beta1": args.nadam_beta1,
+            "nadam_beta2": args.nadam_beta2,
         },
         "output": {
             "checkpoint_path": args.checkpoint_path,
@@ -156,6 +171,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     import torch
     try:
         from vision_backend.model.optimizers import (
+            build_routed_muon_nadam_optimizer,
             create_cosine_scheduler_with_warmup,
             create_optimizer,
         )
@@ -179,6 +195,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         )
     except ModuleNotFoundError:
         from model.optimizers import (
+            build_routed_muon_nadam_optimizer,
             create_cosine_scheduler_with_warmup,
             create_optimizer,
         )
@@ -249,12 +266,24 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         raise ValueError(f"Unknown model_kind: {model_kind!r} (expected simmim|context).")
     print(f"Model kind: {model_kind}")
 
-    optimizer = create_optimizer(
-        model,
-        lr=float(optimization["learning_rate"]),
-        weight_decay=float(optimization["weight_decay"]),
-        use_muon=bool(optimization["use_muon"]),
-    )
+    if bool(optimization["use_muon"]):
+        # Routed hybrid: Muon on 2-D weight matrices, NAdam on everything else,
+        # each with its own LR + momentum (all sweepable).
+        optimizer = build_routed_muon_nadam_optimizer(
+            model,
+            muon_lr=float(optimization["muon_lr"]),
+            muon_momentum=float(optimization["muon_momentum"]),
+            muon_weight_decay=float(optimization["muon_weight_decay"]),
+            nadam_lr=float(optimization["nadam_lr"]),
+            nadam_betas=(float(optimization["nadam_beta1"]), float(optimization["nadam_beta2"])),
+        )
+    else:
+        optimizer = create_optimizer(
+            model,
+            lr=float(optimization["learning_rate"]),
+            weight_decay=float(optimization["weight_decay"]),
+            use_muon=False,
+        )
     total_steps = int(optimization["epochs"]) * max(len(loaders["train"]), 1)
     warmup_steps = int(float(optimization["warmup_fraction"]) * total_steps)
     scheduler = create_cosine_scheduler_with_warmup(

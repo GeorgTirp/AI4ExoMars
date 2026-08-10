@@ -252,6 +252,109 @@ def build_simmim_optimizer(
     return torch.optim.AdamW(param_groups, lr=lr, betas=betas)
 
 
+# ---------------------------------------------------------------------------
+# Routed hybrid: Muon on 2-D weight matrices, NAdam on everything else
+# ---------------------------------------------------------------------------
+class CombinedOptimizer(torch.optim.Optimizer):
+    """Drive several sub-optimizers as one, so the existing single-optimizer
+    training loop (AMP GradScaler, one LambdaLR, grad-clip) needs no changes.
+
+    ``param_groups`` concatenates the sub-optimizers' groups (the SAME dict
+    objects, not copies), so one LambdaLR scales every group by the same factor
+    while preserving each group's independent base LR, and ``GradScaler`` /
+    ``clip_grad_norm_`` see every parameter. ``step`` / ``zero_grad`` fan out.
+    Subclasses ``Optimizer`` only to satisfy ``LRScheduler``'s isinstance check;
+    the base ``__init__`` is intentionally not called.
+    """
+
+    def __init__(self, optimizers: list[torch.optim.Optimizer]):
+        if not optimizers:
+            raise ValueError("CombinedOptimizer needs at least one optimizer.")
+        self.optimizers = list(optimizers)
+        self.defaults = dict(self.optimizers[0].defaults)
+        # concrete list of the real group dicts so scheduler lr writes propagate
+        self.param_groups = [g for opt in self.optimizers for g in opt.param_groups]
+
+    @property
+    def state(self):  # merged read-only view (unused by GradScaler/LambdaLR)
+        merged: dict = {}
+        for opt in self.optimizers:
+            merged.update(opt.state)
+        return merged
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        for opt in self.optimizers:
+            opt.zero_grad(set_to_none=set_to_none)
+
+    def step(self, closure=None):
+        loss = closure() if closure is not None else None
+        for opt in self.optimizers:
+            opt.step()
+        return loss
+
+    def state_dict(self) -> dict:
+        return {"optimizers": [opt.state_dict() for opt in self.optimizers]}
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        for opt, sub in zip(self.optimizers, state_dict["optimizers"]):
+            opt.load_state_dict(sub)
+
+
+def build_routed_muon_nadam_optimizer(
+    model: torch.nn.Module,
+    *,
+    muon_lr: float,
+    muon_momentum: float = 0.95,
+    muon_weight_decay: float = 0.01,
+    nadam_lr: float,
+    nadam_betas: tuple[float, float] = (0.9, 0.999),
+    nadam_weight_decay: float = 0.0,
+    require_muon: bool = True,
+) -> CombinedOptimizer:
+    """Muon on the 2-D weight matrices, NAdam on everything else.
+
+    Routing reuses ``split_decay_param_groups``: the decay group is exactly the
+    >=2-D non-embedding weights (Muon's domain), and the no-decay group is the
+    1-D params + relative-position-bias tables + GRN affine + mask scalar (NAdam,
+    no weight decay). Muon and NAdam are independent optimizers with their own
+    LR and momentum, wrapped in a CombinedOptimizer so the training loop is
+    unchanged.
+    """
+    decay, no_decay = split_decay_param_groups(model, muon_weight_decay)
+    muon_params = decay["params"]
+    aux_params = no_decay["params"]
+
+    aux = torch.optim.NAdam(
+        aux_params, lr=nadam_lr, betas=nadam_betas, weight_decay=nadam_weight_decay
+    )
+
+    if _HAS_MUON:
+        print("[optimizers] Routed: Muon on 2-D weight matrices "
+              f"(lr={muon_lr}, momentum={muon_momentum}), NAdam on the rest "
+              f"(lr={nadam_lr}, betas={nadam_betas}).")
+        muon = Muon(
+            muon_params, lr=muon_lr, momentum=muon_momentum,
+            weight_decay=muon_weight_decay,
+        )
+        return CombinedOptimizer([muon, aux])
+
+    if require_muon:
+        raise RuntimeError(
+            "Routed Muon+NAdam requested but the 'muon' package is not installed.\n"
+            "Install it on the server:  uv pip install git+https://github.com/KellerJordan/Muon\n"
+            "(or run with --use-muon off to use a single NAdam optimizer)."
+        )
+
+    # test/CI fallback only: NAdam on the weight group too (keeps plumbing usable
+    # without Muon; NOT for real training -- Muon LRs would be far too large).
+    print("[optimizers] Muon unavailable -- FALLBACK: NAdam on the weight group "
+          "too (plumbing only, do not train seriously like this).")
+    muon_fallback = torch.optim.NAdam(
+        muon_params, lr=nadam_lr, betas=nadam_betas, weight_decay=muon_weight_decay
+    )
+    return CombinedOptimizer([muon_fallback, aux])
+
+
 def create_warmup_cosine_with_floor(
     optimizer: torch.optim.Optimizer,
     *,

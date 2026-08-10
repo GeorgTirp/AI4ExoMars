@@ -5,15 +5,32 @@
     "goal": "maximize"
   },
   "parameters": {
-    "optimization.learning_rate": {
+    "optimization.muon_lr": {
       "distribution": "log_uniform_values",
-      "min": 1e-05,
-      "max": 0.001
+      "min": 1e-04,
+      "max": 5e-02
     },
-    "optimization.weight_decay": {
+    "optimization.muon_momentum": {
+      "values": [0.9, 0.95, 0.99]
+    },
+    "optimization.muon_weight_decay": {
       "distribution": "log_uniform_values",
       "min": 1e-06,
-      "max": 0.05
+      "max": 5e-02
+    },
+    "optimization.nadam_lr": {
+      "distribution": "log_uniform_values",
+      "min": 1e-05,
+      "max": 1e-03
+    },
+    "optimization.nadam_beta1": {
+      "values": [0.85, 0.9, 0.95]
+    },
+    "optimization.nadam_beta2": {
+      "values": [0.99, 0.999]
+    },
+    "optimization.warmup_fraction": {
+      "values": [0.02, 0.05, 0.1]
     },
     "initialization.freeze_encoder_epochs": {
       "values": [0, 3, 5, 10]
@@ -21,8 +38,11 @@
     "model.decoder_channels": {
       "values": [128, 192, 256]
     },
+    "model.drop_path": {
+      "values": [0.0, 0.1, 0.2]
+    },
     "data.batch_size": {
-      "values": [8]
+      "values": [4, 8]
     }
   }
 }
