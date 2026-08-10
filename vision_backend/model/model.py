@@ -385,22 +385,21 @@ class WindowAttention(nn.Module):
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
 
-        attn_mask = self._relative_position_bias(dtype=q.dtype).unsqueeze(0)
+        # Manual attention: avoids SDPA memory-efficient backward failing when a
+        # [1, heads, N, N] float bias is broadcast against a [B, heads, N, N]
+        # query (the kernel cannot reduce d_bias over the batch dimension).
+        attn = (q * self.scale) @ k.transpose(-2, -1)  # [b_windows, heads, N, N]
+        attn = attn + self._relative_position_bias(dtype=q.dtype).unsqueeze(0)
 
         if mask is not None:
             num_windows = mask.shape[0]
             batch_size = b_windows // num_windows
-            window_mask = mask.to(device=x.device, dtype=q.dtype).unsqueeze(1)
-            attn_mask = (window_mask + attn_mask).repeat(batch_size, 1, 1, 1)
+            attn = attn + mask.to(device=x.device, dtype=q.dtype).unsqueeze(1).repeat(batch_size, 1, 1, 1)
 
-        x = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.attn_drop.p if self.training else 0.0,
-        )
-        x = x.transpose(1, 2).reshape(b_windows, n, c)
+        attn = F.softmax(attn, dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(b_windows, n, c)
 
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -1212,16 +1211,20 @@ class WeakReconstructionDecoder(nn.Module):
             x = x + skip
             x = self.fuse(x)
 
-        # Directly upsample to full resolution.
-        # This is intentionally simple.
-        x = F.interpolate(
-            x,
+        # Apply the 1x1 projection head before upsampling so we never materialise a
+        # [B, decoder_channels, H, W] tensor at full resolution.  A 1x1 conv and
+        # bilinear upsample commute (both are channel-independent linear ops), so
+        # the output is identical to projecting after upsampling, but avoids
+        # int32 overflow (CUDA error: invalid configuration argument) when
+        # B * decoder_channels * H * W >= 2^31.
+        reconstruction = self.reconstruction_head(x)
+
+        reconstruction = F.interpolate(
+            reconstruction,
             size=output_size,
             mode="bilinear",
             align_corners=False,
         )
-
-        reconstruction = self.reconstruction_head(x)
 
         return reconstruction
     

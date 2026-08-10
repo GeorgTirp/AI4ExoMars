@@ -22,7 +22,7 @@
       "values": [128, 192, 256]
     },
     "data.batch_size": {
-      "values": [2, 4, 8]
+      "values": [8]
     }
   }
 }

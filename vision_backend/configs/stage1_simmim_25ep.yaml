@@ -1,0 +1,49 @@
+# Stage-1 SimMIM pretraining — 25-epoch run with best hparams from sweep.
+# ~110 steps/epoch (27,990 train crops / 256 effective batch) → 2,750 steps.
+
+seed: 42
+precision: bf16
+deterministic: false
+
+data:
+  index_path: data/hirise_simmim_crops/crops_index.csv
+  splits_path: null
+  batch_size: 8
+  num_workers: 4
+  persistent_workers: true
+  prefetch_factor: 2
+  augment: true
+  crop_size: 1024
+
+model:
+  in_channels: 1
+  global_base_grid: 32
+  window_size: 8
+  drop_path: 0.198
+  use_checkpoint: true
+  mask_unit: 32
+  mask_ratio: 0.4
+  loss_type: l1
+
+optim:
+  optimizer: adamw
+  base_lr: 1.404e-3
+  min_lr: 1.0e-6
+  weight_decay: 2.215e-5
+  beta1: 0.942
+  beta2: 0.973
+  warmup_fraction: 0.169
+  effective_batch: 256
+  grad_clip: 1.82
+  total_steps: 2750
+  ema_decay: 0.9993
+
+output:
+  checkpoint_dir: checkpoints/stage1_simmim_25ep
+  run_name: stage1_simmim_25ep
+  history_path: checkpoints/stage1_simmim_25ep/history.csv
+  checkpoint_every: 500
+  val_every: 110
+  panel_every: 550
+  log_every: 25
+  num_panels: 8

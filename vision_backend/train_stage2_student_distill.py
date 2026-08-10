@@ -84,6 +84,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--val-fraction", type=float, default=0.1)
     parser.add_argument("--test-fraction", type=float, default=0.0)
     parser.add_argument("--use-muon", action="store_true")
+    parser.add_argument("--muon-momentum", type=float, default=0.95)
+    parser.add_argument("--muon-ns-steps", type=int, default=5)
+    parser.add_argument("--adam-beta1", type=float, default=0.9)
+    parser.add_argument("--adam-beta2", type=float, default=0.95)
+    parser.add_argument("--adam-eps", type=float, default=1e-8)
     parser.add_argument("--checkpoint-path", default="checkpoints/stage2_student_distill.pt")
     parser.add_argument("--history-path", default="outputs/stage2_student_distill_history.csv")
     parser.add_argument("--seed", type=int, default=42)
@@ -134,6 +139,11 @@ def build_config(args: argparse.Namespace) -> dict:
             "weight_decay": args.weight_decay,
             "warmup_fraction": args.warmup_fraction,
             "use_muon": args.use_muon,
+            "muon_momentum": args.muon_momentum,
+            "muon_ns_steps": args.muon_ns_steps,
+            "adam_beta1": args.adam_beta1,
+            "adam_beta2": args.adam_beta2,
+            "adam_eps": args.adam_eps,
         },
         "output": {
             "checkpoint_path": args.checkpoint_path,
@@ -249,6 +259,11 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         lr=float(optimization["learning_rate"]),
         weight_decay=float(optimization["weight_decay"]),
         use_muon=bool(optimization["use_muon"]),
+        muon_momentum=float(optimization.get("muon_momentum", 0.95)),
+        muon_ns_steps=int(optimization.get("muon_ns_steps", 5)),
+        adam_beta1=float(optimization.get("adam_beta1", 0.9)),
+        adam_beta2=float(optimization.get("adam_beta2", 0.95)),
+        adam_eps=float(optimization.get("adam_eps", 1e-8)),
     )
 
     loaders = create_context_patch_dataloaders(

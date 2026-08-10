@@ -60,6 +60,7 @@ class OptimConfig:
 class OutputConfig:
     checkpoint_dir: str = "checkpoints/stage1_simmim"
     run_name: str = "stage1_simmim"
+    history_path: str = "checkpoints/stage1_simmim/history.csv"
     checkpoint_every: int = 5_000
     val_every: int = 1_000
     panel_every: int = 2_000
