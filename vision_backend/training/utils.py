@@ -237,6 +237,7 @@ def run_segmentation_epoch(
     optimizer=None,
     scheduler=None,
     use_amp: bool = False,
+    accum_steps: int = 1,
     progress_desc: Optional[str] = None,
     leave_progress: bool = False,
 ) -> dict[str, float]:
@@ -246,6 +247,7 @@ def run_segmentation_epoch(
         tqdm = None
 
     training = optimizer is not None
+    accum_steps = max(int(accum_steps), 1)
     model.train(training)
     loss_fn = torch_module.nn.CrossEntropyLoss(ignore_index=ignore_index)
     use_cuda_amp = bool(use_amp and device.type == "cuda")
@@ -269,11 +271,14 @@ def run_segmentation_epoch(
     total_loss = 0.0
     total_pixel_acc = 0.0
     total_miou = 0.0
+    num_batches = len(dataloader)
 
     grad_context = torch_module.enable_grad if training else torch_module.no_grad
     try:
         with grad_context():
-            for batch in dataloader:
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+            for batch_index, batch in enumerate(dataloader):
                 local, target, context = parse_segmentation_batch(batch)
                 local = local.to(device, non_blocking=True).float()
                 target = target.to(device, non_blocking=True).long()
@@ -284,8 +289,6 @@ def run_segmentation_epoch(
                 )
 
                 batch_size = local.size(0)
-                if training:
-                    optimizer.zero_grad(set_to_none=True)
 
                 autocast_context = (
                     torch_module.amp.autocast(device_type="cuda", enabled=True)
@@ -301,15 +304,28 @@ def run_segmentation_epoch(
                         loss = loss_fn(logits, target)
 
                 if training:
+                    # Average over the accumulation window so effective-batch
+                    # gradients match a single step over accum_steps*batch_size
+                    # samples -- keeps the LR/batch-size coupling the sweep found.
+                    scaled_loss = loss / accum_steps
                     if scaler is not None:
-                        scaler.scale(loss).backward()
-                        scaler.step(optimizer)
-                        scaler.update()
+                        scaler.scale(scaled_loss).backward()
                     else:
-                        loss.backward()
-                        optimizer.step()
-                    if scheduler is not None:
-                        scheduler.step()
+                        scaled_loss.backward()
+
+                    is_boundary = (
+                        (batch_index + 1) % accum_steps == 0
+                        or (batch_index + 1) == num_batches
+                    )
+                    if is_boundary:
+                        if scaler is not None:
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+                        if scheduler is not None:
+                            scheduler.step()
 
                 metrics = _compute_segmentation_metrics(
                     torch_module,

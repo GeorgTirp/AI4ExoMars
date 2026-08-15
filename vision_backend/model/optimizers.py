@@ -33,9 +33,12 @@ _NO_DECAY_NAME_FRAGMENTS = (
     ".grn.",
 )
 
-# Try importing Muon (optional dependency)
+# Try importing Muon (optional dependency). This repo trains single-process,
+# single-GPU (no torch.distributed.init_process_group anywhere), so we want
+# SingleDeviceMuon -- the upstream `Muon` class now shards across ranks via
+# dist.get_world_size()/all_gather and raises without a process group.
 try:
-    from muon import Muon  # KellerJordan/Muon optimizer
+    from muon import SingleDeviceMuon as Muon  # KellerJordan/Muon optimizer
     _HAS_MUON = True
 except Exception:
     Muon = None  # type: ignore

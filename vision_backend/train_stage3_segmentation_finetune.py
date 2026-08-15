@@ -47,6 +47,14 @@ def parse_args() -> argparse.Namespace:
              "NOAH-H loader: manifest_path, imagery_path, label_path, num_classes).",
     )
     parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument(
+        "--accum-steps",
+        type=int,
+        default=1,
+        help="Gradient accumulation steps. Effective batch size = "
+             "batch_size * accum_steps; use to reproduce a larger swept "
+             "batch size under tighter GPU memory without changing LRs.",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--learning-rate", type=float, default=3e-4,
@@ -108,6 +116,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "loader_factory": args.loader_factory,
             "loader_config_path": args.loader_config_path,
             "batch_size": args.batch_size,
+            "accum_steps": args.accum_steps,
             "num_workers": args.num_workers,
             "num_classes": args.num_classes,
             "ignore_index": args.ignore_index,
@@ -284,7 +293,9 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             weight_decay=float(optimization["weight_decay"]),
             use_muon=False,
         )
-    total_steps = int(optimization["epochs"]) * max(len(loaders["train"]), 1)
+    accum_steps = max(int(data_config.get("accum_steps", 1)), 1)
+    steps_per_epoch = -(-max(len(loaders["train"]), 1) // accum_steps)  # ceil div
+    total_steps = int(optimization["epochs"]) * steps_per_epoch
     warmup_steps = int(float(optimization["warmup_fraction"]) * total_steps)
     scheduler = create_cosine_scheduler_with_warmup(
         optimizer,
@@ -293,9 +304,14 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     )
 
     checkpoint_path = resolve_path(output["checkpoint_path"])
+    epochs_count = int(optimization["epochs"])
+    checkpoint_path = checkpoint_path.with_name(
+        f"{checkpoint_path.stem}_{epochs_count}ep{checkpoint_path.suffix}"
+    )
     history_path = resolve_path(output["history_path"])
 
     print(f"Using device: {device}")
+    print(f"Checkpoint path: {checkpoint_path}")
     print(f"Segmentation model params: {count_parameters(model):,}")
     print(f"Encoder params: {count_parameters(model.encoder):,}")
     print(f"Train batches: {len(loaders['train'])}")
@@ -326,6 +342,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             optimizer=optimizer,
             scheduler=scheduler,
             use_amp=use_amp,
+            accum_steps=accum_steps,
             progress_desc=f"Stage3 Epoch {epoch:02d}/{int(optimization['epochs']):02d} [train]",
             leave_progress=True,
         )
@@ -341,6 +358,12 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             progress_desc=f"Stage3 Epoch {epoch:02d}/{int(optimization['epochs']):02d} [val]",
             leave_progress=True,
         )
+        if device.type == "cuda":
+            # Train (fp16 autocast) and val (fp32, no-grad) leave differently
+            # shaped blocks in the caching allocator; on a near-full GPU that
+            # fragmentation can OOM the next epoch even with enough nominal
+            # free memory. Reset the pool at the epoch boundary.
+            torch.cuda.empty_cache()
         current_lr = float(optimizer.param_groups[0]["lr"])
         row = {
             "epoch": epoch,

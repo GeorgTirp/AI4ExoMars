@@ -137,6 +137,65 @@ def load_simmim_encoder_checkpoint(
     load_prefixed_state_dict(encoder_model, state_dict, prefix="encoder.", strict=strict)
 
 
+def load_segmentation_model_from_checkpoint(
+    checkpoint_path: Path,
+    *,
+    device: str = "cpu",
+    strict: bool = True,
+) -> tuple[Any, str, int, dict[str, Any]]:
+    """Reconstruct + load a stage-3 segmentation model from its own checkpoint.
+
+    The checkpoint (as written by ``train_stage3_segmentation_finetune.py``) is
+    self-describing: ``config["model"]`` has everything ``build_*_segmentation_model``
+    needs except ``num_classes``, which isn't saved there -- so it's inferred from
+    the classifier head's output channel count in the state dict itself, which is
+    robust even if the config's shape changes.
+
+    Returns
+    -------
+    (model, model_kind, num_classes, config)
+        `model` is eval()'d and moved to `device`; `config` is the checkpoint's raw
+        saved config dict, for callers that want additional fields from it.
+    """
+    import torch
+
+    checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=False)
+    state_dict = checkpoint.get("model_state", checkpoint)
+    config = checkpoint.get("config", {}) or {}
+    model_config = dict(config.get("model", {}) or {})
+    model_kind = model_config.get("model_kind", "simmim")
+
+    head_weight = state_dict.get("decoder.head.weight")
+    if head_weight is not None:
+        num_classes = int(head_weight.shape[0])
+    else:
+        data_cfg = config.get("data", {}) or {}
+        num_classes = data_cfg.get("num_classes") or model_config.get("num_classes")
+        if num_classes is None:
+            raise ValueError(
+                "Could not determine num_classes from checkpoint: no "
+                "'decoder.head.weight' entry in the state dict, and no num_classes "
+                "in the saved config."
+            )
+        num_classes = int(num_classes)
+
+    model_config["num_classes"] = num_classes
+    model_config.setdefault("in_channels", 1)
+
+    if model_kind == "simmim":
+        model = build_simmim_segmentation_model(model_config)
+    elif model_kind == "context":
+        model = build_context_segmentation_model(model_config)
+    else:
+        raise ValueError(f"Unknown model_kind in checkpoint: {model_kind!r} (expected simmim|context)")
+
+    model.load_state_dict(state_dict, strict=strict)
+    model = model.to(device)
+    model.eval()
+
+    return model, model_kind, num_classes, config
+
+
 def load_encoder_from_pretrainer_checkpoint(
     torch_module,
     encoder_model,
