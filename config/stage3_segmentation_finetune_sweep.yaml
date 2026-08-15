@@ -1,0 +1,100 @@
+# Wandb sweep config for Stage 3: supervised segmentation fine-tuning.
+#
+# Requires a finished Stage 2 student checkpoint at
+# results/stage2_student_distill/stage2_best_model.pt (default from tune_stage2.sh
+# is results/tune_stage2/best.pt).  Edit --encoder-checkpoint below if your path
+# differs.
+#
+# Initialise once:
+#   cd AI4ExoMars
+#   wandb sweep --project ai4exomars config/stage3_segmentation_finetune_sweep.yaml
+#
+# Then append agent runs:
+#   ./tune_stage3.sh <entity/ai4exomars/sweep_id>
+#   condor_submit_bid 30 tune_stage3.sub SWEEP_ID=geotir-university-of-t-bingen/noah_simmim/jokh82y0
+
+program: vision_backend/train_stage3_segmentation_finetune.py
+project: ai4exomars
+method: bayes
+
+metric:
+  name: val/miou
+  goal: maximize
+
+run_cap: 20
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - vision_backend.train_stage3_segmentation_finetune
+  - --wandb
+  - --wandb-project
+  - ai4exomars
+  - --wandb-group
+  - stage3-hparam-sweep
+  - --wandb-job-type
+  - stage3-tune
+  - --encoder-checkpoint
+  - results/tune_stage2/best.pt
+  - --local-base-channels
+  - "32"
+  - --context-base-channels
+  - "16"
+  - --context-dim
+  - "192"
+  - --epochs
+  - "25"
+  - --batch-size
+  - "8"
+  - --num-workers
+  - "4"
+  - --use-muon
+  - --checkpoint-path
+  - results/tune_stage3/best.pt
+  - --history-path
+  - results/tune_stage3/history.csv
+
+# ── Optimizer hyperparameters ──────────────────────────────────────────────────
+parameters:
+  optimization.learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-2
+
+  optimization.weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 0.1
+
+  optimization.warmup_fraction:
+    distribution: uniform
+    min: 0.02
+    max: 0.25
+
+  optimization.muon_momentum:
+    distribution: uniform
+    min: 0.85
+    max: 0.99
+
+  optimization.muon_ns_steps:
+    values: [3, 5, 7]
+
+  optimization.adam_beta1:
+    distribution: uniform
+    min: 0.85
+    max: 0.95
+
+  optimization.adam_beta2:
+    distribution: uniform
+    min: 0.95
+    max: 0.999
+
+  optimization.adam_eps:
+    distribution: log_uniform_values
+    min: 1.0e-9
+    max: 1.0e-6
+
+# ── Fine-tuning hyperparameters ────────────────────────────────────────────────
+  initialization.freeze_encoder_epochs:
+    values: [0, 3, 5, 10]

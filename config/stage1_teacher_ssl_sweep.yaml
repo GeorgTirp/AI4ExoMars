@@ -1,0 +1,105 @@
+# Wandb sweep config for Stage 1: self-supervised teacher SSL pretraining.
+#
+# Initialise once:
+#   cd AI4ExoMars
+#   wandb sweep --project ai4exomars config/stage1_teacher_ssl_sweep.yaml
+#
+# Then append agent runs (one per Condor slot):
+#   ./tune_stage1.sh <entity/ai4exomars/sweep_id>
+#   condor_submit tune_stage1.sub SWEEP_ID=<entity/ai4exomars/sweep_id>
+
+program: vision_backend/train_stage1_teacher_ssl.py
+project: ai4exomars
+method: bayes
+
+metric:
+  name: val/loss
+  goal: minimize
+
+# Hard cap on total trials across all agents.
+run_cap: 24
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - vision_backend.train_stage1_teacher_ssl
+  - --wandb
+  - --wandb-project
+  - ai4exomars
+  - --wandb-group
+  - stage1-hparam-sweep
+  - --wandb-job-type
+  - stage1-tune
+  - --index-path
+  - data/patch_index.csv
+  - --dataset-backend
+  - auto
+  - --epochs
+  - "10"
+  - --batch-size
+  - "32"
+  - --num-workers
+  - "4"
+  - --use-muon
+  - --val-fraction
+  - "0.1"
+  - --test-fraction
+  - "0.0"
+  - --initial-checkpoint-path
+  - results/tune_stage1/initial.pt
+  - --checkpoint-path
+  - results/tune_stage1/best.pt
+  - --final-checkpoint-path
+  - results/tune_stage1/final.pt
+  - --history-path
+  - results/tune_stage1/history.csv
+  - --examples-path
+  - results/tune_stage1/examples.pt
+
+# ── Optimizer hyperparameters ──────────────────────────────────────────────────
+parameters:
+  optimization.learning_rate:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 3.0e-3
+
+  optimization.weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 0.1
+
+  optimization.warmup_fraction:
+    distribution: uniform
+    min: 0.02
+    max: 0.25
+
+  optimization.muon_momentum:
+    distribution: uniform
+    min: 0.85
+    max: 0.99
+
+  optimization.muon_ns_steps:
+    values: [5]
+
+  optimization.adam_beta1:
+    distribution: uniform
+    min: 0.85
+    max: 0.95
+
+  optimization.adam_beta2:
+    distribution: uniform
+    min: 0.95
+    max: 0.999
+
+  optimization.adam_eps:
+    distribution: log_uniform_values
+    min: 1.0e-9
+    max: 1.0e-6
+
+# ── SSL training hyperparameters ───────────────────────────────────────────────
+  model.mask_ratio:
+    values: [0.40, 0.50, 0.60, 0.70, 0.75]
+
+  model.mask_patch_size:
+    values: [8, 16, 32]
