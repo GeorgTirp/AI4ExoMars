@@ -1,0 +1,84 @@
+# Wandb sweep config for Stage 1: SimMIM self-supervised pretraining (v2 hybrid encoder).
+#
+# Initialise once:
+#   cd AI4ExoMars
+#   wandb sweep --project ai4exomars config/stage1_simmim_sweep.yaml
+#
+# Then append agent runs (one per Condor slot):
+#   ./tune_stage1_simmim.sh <entity/ai4exomars/sweep_id>
+#   condor_submit tune_stage1_simmim.sub SWEEP_ID=<entity/ai4exomars/sweep_id>
+
+program: vision_backend/train_stage1_simmim.py
+project: ai4exomars
+method: bayes
+
+metric:
+  name: val/loss
+  goal: minimize
+
+run_cap: 24
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - vision_backend.train_stage1_simmim
+  - --wandb
+  - --wandb-project
+  - ai4exomars
+  - --wandb-group
+  - stage1-simmim-hparam-sweep
+  - --wandb-job-type
+  - stage1-simmim-tune
+  - --config
+  - vision_backend/configs/stage1_simmim.yaml
+  - --set
+  - "optim.total_steps=1200"
+  - --set
+  - "output.val_every=200"
+
+# ── Optimizer hyperparameters ──────────────────────────────────────────────────
+parameters:
+  optim.base_lr:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 3.0e-3
+
+  optim.weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 0.1
+
+  optim.warmup_fraction:
+    distribution: uniform
+    min: 0.02
+    max: 0.25
+
+  optim.beta1:
+    distribution: uniform
+    min: 0.85
+    max: 0.95
+
+  optim.beta2:
+    distribution: uniform
+    min: 0.95
+    max: 0.999
+
+  optim.grad_clip:
+    distribution: uniform
+    min: 0.5
+    max: 5.0
+
+  optim.ema_decay:
+    distribution: log_uniform_values
+    min: 0.999
+    max: 0.99999
+
+# ── Model / masking hyperparameters ───────────────────────────────────────────
+  model.mask_ratio:
+    values: [0.40, 0.50, 0.60, 0.70, 0.75]
+
+  model.drop_path:
+    distribution: uniform
+    min: 0.0
+    max: 0.2

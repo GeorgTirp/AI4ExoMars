@@ -1,0 +1,107 @@
+# Wandb sweep config for Stage 2: knowledge distillation from teacher to student.
+#
+# Requires a finished Stage 1 checkpoint at results/stage1_training/stage1_best_model.pt
+# (or set STAGE1_CHECKPOINT env var and pass it manually).
+#
+# Initialise once:
+#   cd AI4ExoMars
+#   wandb sweep --project ai4exomars config/stage2_student_distill_sweep.yaml
+#
+# Then append agent runs:
+#   ./tune_stage2.sh <entity/ai4exomars/sweep_id>
+#   condor_submit tune_stage2.sub SWEEP_ID=<entity/ai4exomars/sweep_id>
+
+program: vision_backend/train_stage2_student_distill.py
+project: ai4exomars
+method: bayes
+
+metric:
+  name: val/loss
+  goal: minimize
+
+run_cap: 20
+
+command:
+  - ${env}
+  - ${interpreter}
+  - -m
+  - vision_backend.train_stage2_student_distill
+  - --wandb
+  - --wandb-project
+  - ai4exomars
+  - --wandb-group
+  - stage2-hparam-sweep
+  - --wandb-job-type
+  - stage2-tune
+  - --index-path
+  - data/patch_index.csv
+  - --dataset-backend
+  - auto
+  - --teacher-checkpoint
+  - results/stage1_training/stage1_best_model.pt
+  - --epochs
+  - "15"
+  - --batch-size
+  - "32"
+  - --num-workers
+  - "4"
+  - --use-muon
+  - --val-fraction
+  - "0.1"
+  - --test-fraction
+  - "0.0"
+  - --checkpoint-path
+  - results/tune_stage2/best.pt
+  - --history-path
+  - results/tune_stage2/history.csv
+
+# ── Optimizer hyperparameters ──────────────────────────────────────────────────
+parameters:
+  optimization.learning_rate:
+    distribution: log_uniform_values
+    min: 5.0e-5
+    max: 3.0e-3
+
+  optimization.weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 0.1
+
+  optimization.warmup_fraction:
+    distribution: uniform
+    min: 0.02
+    max: 0.25
+
+  optimization.muon_momentum:
+    distribution: uniform
+    min: 0.85
+    max: 0.99
+
+  optimization.muon_ns_steps:
+    values: [3, 5, 7]
+
+  optimization.adam_beta1:
+    distribution: uniform
+    min: 0.85
+    max: 0.95
+
+  optimization.adam_beta2:
+    distribution: uniform
+    min: 0.95
+    max: 0.999
+
+  optimization.adam_eps:
+    distribution: log_uniform_values
+    min: 1.0e-9
+    max: 1.0e-6
+
+# ── Distillation hyperparameters ───────────────────────────────────────────────
+  distillation.normalize_features:
+    values: [true, false]
+
+  distillation.feature_weights:
+    values:
+      - [1.0, 1.0, 1.0]
+      - [0.5, 1.0, 1.5]
+      - [0.25, 0.75, 2.0]
+      - [1.0, 1.5, 2.0]
