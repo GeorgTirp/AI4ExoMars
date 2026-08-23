@@ -80,6 +80,10 @@ def build_context_segmentation_model(model_config: dict[str, Any]) -> ContextAwa
         skip8_index=3,
         skip4_index=1,
         skip2_index=0,
+        num_classes_ig=model_config.get("num_classes_ig"),
+        decoder_dropout=model_config.get("decoder_dropout", 0.0),
+        use_aspp=model_config.get("use_aspp", False),
+        aspp_rates=model_config.get("aspp_rates", (6, 12, 18)),
     )
 
 
@@ -109,6 +113,10 @@ def build_simmim_segmentation_model(model_config: dict[str, Any]) -> SingleBranc
         skip4_channels=skip4_channels,
         skip2_channels=skip2_channels,
         decoder_channels=model_config.get("decoder_channels", 256),
+        num_classes_ig=model_config.get("num_classes_ig"),
+        decoder_dropout=model_config.get("decoder_dropout", 0.0),
+        use_aspp=model_config.get("use_aspp", False),
+        aspp_rates=model_config.get("aspp_rates", (6, 12, 18)),
     )
 
 
@@ -180,6 +188,18 @@ def load_segmentation_model_from_checkpoint(
         num_classes = int(num_classes)
 
     model_config["num_classes"] = num_classes
+
+    # The F1 IG aux head (decoder.head_ig) is a real Conv2d with its own
+    # parameters, so it must exist on the freshly-built model *before*
+    # load_state_dict below, or a checkpoint saved with it on fails to load.
+    # Dropout (F4) needs no equivalent handling: nn.Dropout2d holds no
+    # parameters, so it's absent from state_dict and any decoder_dropout value
+    # reconstructs correctly -- doesn't matter anyway since eval() makes it a
+    # no-op immediately below.
+    ig_head_weight = state_dict.get("decoder.head_ig.weight")
+    if ig_head_weight is not None:
+        model_config["num_classes_ig"] = int(ig_head_weight.shape[0])
+
     model_config.setdefault("in_channels", 1)
 
     if model_kind == "simmim":

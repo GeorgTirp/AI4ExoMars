@@ -33,6 +33,75 @@ _NO_DECAY_NAME_FRAGMENTS = (
     ".grn.",
 )
 
+# Layer-wise LR decay (LLRD) depth ranks, shallow (0) -> deep (_LLRD_MAX_DEPTH).
+# Matches HybridEncoder's own component naming (model/hybrid_encoder.py:
+# stem, s1, down1, s2, down2, s3, down3, s4, norm) exactly, so this is a name
+# match, not a guess -- but it does NOT cover the legacy two-branch
+# ContextAwareConvNeXtSwinEncoder (different internal naming); any "encoder."
+# param that doesn't match one of these prefixes is conservatively treated as
+# the shallowest rank (0, maximally discounted) since its true depth isn't
+# known here -- safer than accidentally leaving an unrecognised deep-encoder
+# component at full LR. Decoder + heads (anything not under "encoder.") always
+# get the top rank, i.e. the full, undiscounted base LR.
+_LLRD_ENCODER_PREFIXES: tuple[tuple[str, int], ...] = (
+    ("encoder.stem", 0),
+    ("encoder.s1", 1),
+    ("encoder.down1", 2),
+    ("encoder.s2", 3),
+    ("encoder.down2", 4),
+    ("encoder.s3", 5),
+    ("encoder.down3", 6),
+    ("encoder.s4", 7),
+    ("encoder.norm", 7),
+)
+_LLRD_MAX_DEPTH = 8  # decoder/heads rank
+
+
+def llrd_depth_rank(param_name: str) -> int:
+    """Depth rank for `param_name`: 0 (stem, most LR-discounted) ..
+    _LLRD_MAX_DEPTH (decoder/heads, full LR)."""
+    for prefix, rank in _LLRD_ENCODER_PREFIXES:
+        if param_name == prefix or param_name.startswith(prefix + "."):
+            return rank
+    if param_name.startswith("encoder."):
+        return 0
+    return _LLRD_MAX_DEPTH
+
+
+def llrd_lr_scale(param_name: str, llrd: float) -> float:
+    """Multiplier on a param's base LR for layer-wise LR decay. llrd=1.0 (the
+    neutral default) always returns 1.0 regardless of depth -- current
+    behavior, unchanged."""
+    if llrd == 1.0:
+        return 1.0
+    return llrd ** (_LLRD_MAX_DEPTH - llrd_depth_rank(param_name))
+
+
+def _group_params_by_llrd_rank(
+    named_params: list[tuple[str, torch.nn.Parameter]],
+    base_lr: float,
+    llrd: float,
+    *,
+    extra: Optional[dict] = None,
+) -> list[dict]:
+    """Bucket (name, param) pairs by LLRD depth rank and build optimizer
+    param-group dicts, each with its own `lr = base_lr * llrd_lr_scale(...)`.
+    `extra` (e.g. {"weight_decay": ...}) is merged into every group unchanged
+    -- LLRD only ever adds an `lr` axis on top of the existing decay grouping,
+    never changes which bucket/optimizer a param belongs to."""
+    by_rank: dict[int, list[torch.nn.Parameter]] = {}
+    for name, param in named_params:
+        by_rank.setdefault(llrd_depth_rank(name), []).append(param)
+    groups = []
+    for rank in sorted(by_rank):
+        scale = 1.0 if llrd == 1.0 else llrd ** (_LLRD_MAX_DEPTH - rank)
+        group = {"params": by_rank[rank], "lr": base_lr * scale}
+        if extra:
+            group.update(extra)
+        groups.append(group)
+    return groups
+
+
 # Try importing Muon (optional dependency). This repo trains single-process,
 # single-GPU (no torch.distributed.init_process_group anywhere), so we want
 # SingleDeviceMuon -- the upstream `Muon` class now shards across ranks via
@@ -53,19 +122,20 @@ def create_optimizer(
     lr: float = 3e-4,
     weight_decay: float = 1e-2,
     use_muon: bool = True,
+    llrd: float = 1.0,
 ) -> torch.optim.Optimizer:
     r"""
     Create an optimizer for a given model with prioritized fallback logic.
 
     The optimizers are tried in the following priority:
 
-    1. **Muon** (if installed and ``use_muon=True``)  
+    1. **Muon** (if installed and ``use_muon=True``)
        Muon is a second-order optimizer approximating natural gradient steps.
 
-    2. **NAdam**  
+    2. **NAdam**
        PyTorch's NAdam implementation (NadamW-style), supporting weight decay.
 
-    3. **AdamW**  
+    3. **AdamW**
        Stable, widely used, standard fallback.
 
     Parameters
@@ -78,6 +148,10 @@ def create_optimizer(
         Weight decay coefficient (default: ``1e-2``).
     use_muon : bool, optional
         Whether the user prefers to use Muon if available.
+    llrd : float, optional
+        Layer-wise LR decay factor (see `llrd_depth_rank`). ``1.0`` (default)
+        gives every parameter the same `lr`, reproducing today's behavior
+        exactly; ``<1`` discounts shallower encoder components more.
 
     Returns
     -------
@@ -89,21 +163,22 @@ def create_optimizer(
     - Only parameters with ``requires_grad=True`` are passed to the optimizer.
     - If Muon is requested but not installed, AdamW is used and a warning printed.
     """
-    params_list = [p for p in model.parameters() if p.requires_grad]
+    named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
+    param_groups = _group_params_by_llrd_rank(named_params, lr, llrd)
 
     # --------------------
     # 1) Try Muon
     # --------------------
     if use_muon and _HAS_MUON:
         print("[optimizers] Using Muon optimizer.")
-        return Muon(params_list, lr=lr, weight_decay=weight_decay)  # type: ignore
+        return Muon(param_groups, lr=lr, weight_decay=weight_decay)  # type: ignore
 
     # --------------------
     # 2) Try NAdam (NadamW-style)
     # --------------------
     if hasattr(torch.optim, "NAdam"):
         print("[optimizers] Using NAdam (NadamW-style) optimizer.")
-        return torch.optim.NAdam(params_list, lr=lr, weight_decay=weight_decay)
+        return torch.optim.NAdam(param_groups, lr=lr, weight_decay=weight_decay)
 
     # --------------------
     # 3) Fallback: AdamW
@@ -115,7 +190,7 @@ def create_optimizer(
         )
 
     print("[optimizers] Using AdamW optimizer.")
-    return torch.optim.AdamW(params_list, lr=lr, weight_decay=weight_decay)
+    return torch.optim.AdamW(param_groups, lr=lr, weight_decay=weight_decay)
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +367,19 @@ class CombinedOptimizer(torch.optim.Optimizer):
     def step(self, closure=None):
         loss = closure() if closure is not None else None
         for opt in self.optimizers:
+            for group in opt.param_groups:
+                for p in group["params"]:
+                    # Muon flattens >=3-D updates with `update.view(len(update), -1)`.
+                    # Under channels_last the gradient of a conv weight is not
+                    # contiguous in NCHW order, so that view() raises
+                    # "view size is not compatible with input tensor's size and
+                    # stride". Beyond the crash it is a correctness issue: had the
+                    # view succeeded it would have flattened in NHWC order, handing
+                    # Newton-Schulz a differently-permuted matrix than intended.
+                    # Normalising to contiguous makes the flattening layout-
+                    # independent; it is a no-op for already-contiguous grads.
+                    if p.grad is not None and p.grad.dim() >= 3 and not p.grad.is_contiguous():
+                        p.grad = p.grad.contiguous()
             opt.step()
         return loss
 
@@ -313,30 +401,72 @@ def build_routed_muon_nadam_optimizer(
     nadam_betas: tuple[float, float] = (0.9, 0.999),
     nadam_weight_decay: float = 0.0,
     require_muon: bool = True,
+    muon_scope: str = "matrix",
+    llrd: float = 1.0,
 ) -> CombinedOptimizer:
-    """Muon on the 2-D weight matrices, NAdam on everything else.
+    """Muon on weight matrices, NAdam on everything else.
 
-    Routing reuses ``split_decay_param_groups``: the decay group is exactly the
-    >=2-D non-embedding weights (Muon's domain), and the no-decay group is the
-    1-D params + relative-position-bias tables + GRN affine + mask scalar (NAdam,
-    no weight decay). Muon and NAdam are independent optimizers with their own
-    LR and momentum, wrapped in a CombinedOptimizer so the training loop is
-    unchanged.
+    ``muon_scope`` controls what "matrix" means, because weight-decay grouping
+    and optimizer routing are *different* questions that happen to share a
+    predicate:
+
+    - ``"matrix"`` (default): only genuinely 2-D weights -- attention qkv/proj
+      and MLP layers -- go to Muon. Convolution weights are 4-D and go to NAdam
+      (still with weight decay). This is the regime Muon is designed and
+      benchmarked for.
+    - ``"all"``: every >=2-D weight goes to Muon, reproducing the original
+      routing. On this hybrid conv/transformer encoder that sent 48 of 80
+      tensors -- every conv, including depthwise ones -- through Muon's
+      Newton-Schulz orthogonalisation. Muon flattens a 4-D filter bank via
+      ``update.view(len(update), -1)``, so a depthwise ``[C,1,7,7]`` becomes
+      ``[C,49]`` and orthogonalisation forces mutually-orthogonal filters across
+      channels that are independent by construction -- a constraint with no
+      meaning for depthwise convolution, and outside Muon's validated domain.
+
+    Muon and NAdam are independent optimizers with their own LR and momentum,
+    wrapped in a CombinedOptimizer so the training loop is unchanged.
+
+    ``llrd`` (see `llrd_depth_rank`) scales *within* each existing bucket --
+    it never moves a param between the Muon/NAdam-decayed/NAdam-undecayed
+    groups above, only multiplies that bucket's own base LR by a depth-
+    dependent factor. ``1.0`` (default) reproduces today's LRs exactly.
     """
-    decay, no_decay = split_decay_param_groups(model, muon_weight_decay)
-    muon_params = decay["params"]
-    aux_params = no_decay["params"]
+    if muon_scope not in ("matrix", "all"):
+        raise ValueError(f"muon_scope must be 'matrix' or 'all', got {muon_scope!r}")
 
-    aux = torch.optim.NAdam(
-        aux_params, lr=nadam_lr, betas=nadam_betas, weight_decay=nadam_weight_decay
+    muon_named: list[tuple[str, torch.nn.Parameter]] = []
+    aux_decay_named: list[tuple[str, torch.nn.Parameter]] = []
+    aux_no_decay_named: list[tuple[str, torch.nn.Parameter]] = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or any(frag in name for frag in _NO_DECAY_NAME_FRAGMENTS):
+            aux_no_decay_named.append((name, param))
+        elif muon_scope == "all" or param.ndim == 2:
+            muon_named.append((name, param))
+        else:
+            # >=3-D (conv) weights: not Muon's domain, but still decayed.
+            aux_decay_named.append((name, param))
+
+    aux_groups = (
+        _group_params_by_llrd_rank(aux_no_decay_named, nadam_lr, llrd, extra={"weight_decay": nadam_weight_decay})
+        + _group_params_by_llrd_rank(aux_decay_named, nadam_lr, llrd, extra={"weight_decay": muon_weight_decay})
     )
+    print(f"[optimizers] muon_scope={muon_scope}: Muon {len(muon_named)} tensors, "
+          f"NAdam {len(aux_decay_named)} conv/>=3-D (decayed) + {len(aux_no_decay_named)} 1-D/excluded. "
+          f"llrd={llrd}")
+    aux = torch.optim.NAdam(
+        aux_groups, lr=nadam_lr, betas=nadam_betas, weight_decay=nadam_weight_decay
+    )
+
+    muon_groups = _group_params_by_llrd_rank(muon_named, muon_lr, llrd)
 
     if _HAS_MUON:
         print("[optimizers] Routed: Muon on 2-D weight matrices "
               f"(lr={muon_lr}, momentum={muon_momentum}), NAdam on the rest "
               f"(lr={nadam_lr}, betas={nadam_betas}).")
         muon = Muon(
-            muon_params, lr=muon_lr, momentum=muon_momentum,
+            muon_groups, lr=muon_lr, momentum=muon_momentum,
             weight_decay=muon_weight_decay,
         )
         return CombinedOptimizer([muon, aux])
@@ -350,10 +480,13 @@ def build_routed_muon_nadam_optimizer(
 
     # test/CI fallback only: NAdam on the weight group too (keeps plumbing usable
     # without Muon; NOT for real training -- Muon LRs would be far too large).
+    # Rebuilt from nadam_lr (not muon_groups, which is scaled from muon_lr) --
+    # that mismatch would silently feed muon-scale LRs into this NAdam.
     print("[optimizers] Muon unavailable -- FALLBACK: NAdam on the weight group "
           "too (plumbing only, do not train seriously like this).")
+    muon_groups_fallback = _group_params_by_llrd_rank(muon_named, nadam_lr, llrd)
     muon_fallback = torch.optim.NAdam(
-        muon_params, lr=nadam_lr, betas=nadam_betas, weight_decay=muon_weight_decay
+        muon_groups_fallback, lr=nadam_lr, betas=nadam_betas, weight_decay=muon_weight_decay
     )
     return CombinedOptimizer([muon_fallback, aux])
 

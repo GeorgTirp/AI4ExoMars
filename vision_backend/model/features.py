@@ -2,12 +2,20 @@
 
 Both `SingleBranchSegmentationModel` and `ContextAwareSegmentationModel`
 (`training/segmentation.py`) share one structural landmark regardless of encoder:
-a final ``decoder.head`` -- a plain ``nn.Conv2d(decoder_channels, num_classes, 1)``
-applied to a feature map already resampled to the input's spatial resolution
-(`LightweightSegmentationDecoder.forward` upsamples to `output_size` immediately
-before calling `head`). Hooking that conv's *input* therefore gives, for any
-current or future decoder internals, the same two things every downstream
-analysis in `uncertainty/` and `pc_align/` needs:
+a final ``decoder.head`` -- a plain ``nn.Conv2d(decoder_channels, num_classes, 1)``.
+
+Note the head runs at the *decoder's* resolution, not the input's:
+`LightweightSegmentationDecoder.forward` classifies first and upsamples the
+resulting logits, because a 1x1 conv and bilinear interpolation commute exactly
+and doing the cheap operand first avoids materialising a
+``decoder_channels x H x W`` activation at full input resolution on every
+training step. `extract_pixel_features` therefore upsamples the hooked features
+itself, so downstream analysis still receives an input-resolution map -- the
+cost is paid only by the analysis paths that actually need it.
+
+Hooking that conv's *input* gives, for any current or future decoder internals,
+the same two things every downstream analysis in `uncertainty/` and `pc_align/`
+needs:
 
 - a per-pixel feature map already aligned with the input image (no extra
   upsampling bookkeeping), for spatial uncertainty maps;
@@ -73,13 +81,23 @@ def extract_pixel_features(model: nn.Module, *inputs: torch.Tensor) -> torch.Ten
     Returns
     -------
     torch.Tensor
-        Feature map of shape [B, F, H, W], already at the input's spatial
-        resolution.
+        Feature map of shape [B, F, H, W] at the *first input's* spatial
+        resolution. The decoder classifies before upsampling (see module
+        docstring), so the hooked map is at the decoder's lower resolution and
+        is resampled here with the same bilinear/align_corners=False settings
+        the decoder uses for its logits -- keeping these features pixel-aligned
+        with both the input image and the model's own output.
     """
     model.eval()
     with hook_pre_classifier_features(model) as captured:
         model(*inputs)
-        return captured["features"]
+        features = captured["features"]
+        output_size = inputs[0].shape[2:]
+        if features.shape[2:] != output_size:
+            features = nn.functional.interpolate(
+                features, size=output_size, mode="bilinear", align_corners=False
+            )
+        return features
 
 
 def extract_pooled_features(model: nn.Module, *inputs: torch.Tensor) -> torch.Tensor:

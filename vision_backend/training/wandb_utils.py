@@ -169,11 +169,72 @@ def log_metrics(run, metrics: dict[str, Any], *, step: Optional[int] = None) -> 
         run.log(metrics, step=step)
 
 
-def merge_wandb_config(base_config: dict[str, Any], run) -> dict[str, Any]:
+def _assert_dotted_path_exists(base: dict[str, Any], dotted_key: str) -> None:
+    """Raise if `dotted_key` does not already name a leaf in `base`.
+
+    A sweep parameter that does not correspond to a real config key is a silent
+    no-op: `_set_by_dotted_path` happily creates it, the run logs it, wandb's
+    Bayes optimizer dutifully searches it, and nothing downstream ever reads it.
+    That is exactly what happened to this repo's stage-3 sweep -- it was written
+    against the pre-Muon-split schema (`optimization.adam_beta1`,
+    `optimization.adam_eps`, `optimization.muon_ns_steps`) and was never updated
+    when commit 9a0039e renamed those to `nadam_*` and introduced separate
+    `muon_lr` / `nadam_lr`. Six of its nine parameters tuned nothing, and the
+    learning rates it appeared to be tuning were never connected at all.
+    """
+    cursor: Any = base
+    walked: list[str] = []
+    for part in dotted_key.split("."):
+        if not isinstance(cursor, dict) or part not in cursor:
+            where = ".".join(walked) or "<root>"
+            available = sorted(cursor.keys()) if isinstance(cursor, dict) else []
+            raise KeyError(
+                f"Sweep/override key {dotted_key!r} does not exist in this "
+                f"stage's config: {part!r} is not a key of {where}. "
+                f"Available there: {available}. "
+                "Nothing reads an invented key, so this parameter would be "
+                "searched by the sweep and silently ignored by training."
+            )
+        cursor = cursor[part]
+        walked.append(part)
+
+
+def _is_early_stop_signal(exc: BaseException) -> bool:
+    """True for wandb's sweep early-termination signal.
+
+    `wandb.agents.pyagent` stops a trial by asynchronously raising a *bare*
+    `Exception` inside the trial thread (PyThreadState_SetAsyncExc with
+    `ctypes.py_object(Exception)`), so the object carries no message and no
+    cause. Real failures in this codebase always raise a specific type
+    (RuntimeError, FloatingPointError, KeyError, SweepConfigurationError, ...)
+    with a message, so an argument-less, cause-less plain `Exception` is an
+    unambiguous signature for "the scheduler culled this trial".
+    """
+    return (
+        type(exc) is Exception
+        and not exc.args
+        and exc.__cause__ is None
+        and exc.__context__ is None
+    )
+
+
+def merge_wandb_config(
+    base_config: dict[str, Any], run, *, strict: bool = True
+) -> dict[str, Any]:
+    """Merge wandb (sweep) overrides onto the stage config.
+
+    `strict` validates that every dotted override names an existing config leaf,
+    so a sweep whose parameter names have drifted from the training script fails
+    immediately instead of quietly optimizing nothing.
+    """
     if run is None:
         return base_config
 
     overrides = dict(run.config)
+    if strict:
+        for key in overrides:
+            if "." in key:
+                _assert_dotted_path_exists(base_config, key)
     return _deep_update(base_config, overrides)
 
 
@@ -206,7 +267,7 @@ def maybe_run_sweep(
           f"count={args.wandb_sweep_count if args.wandb_sweep_count is not None else 'unbounded'}",
           flush=True)
 
-    tally = {"started": 0, "completed": 0}
+    tally = {"started": 0, "completed": 0, "early_stopped": 0}
     first_error: list[BaseException] = []
 
     def _agent_main():
@@ -236,6 +297,17 @@ def maybe_run_sweep(
             tally["completed"] += 1
             print(f"[sweep] trial {trial} completed ({tally['completed']}/{trial} ok)", flush=True)
         except BaseException as exc:  # record, then let wandb mark the run crashed
+            if _is_early_stop_signal(exc):
+                # Not a failure: wandb's hyperband early-terminate stops a trial
+                # by injecting a bare Exception into its thread via
+                # PyThreadState_SetAsyncExc (see wandb/agents/pyagent.py). Left
+                # unlabelled this prints as "FAILED: Exception:" with an empty
+                # message and looks identical to a real crash, which is exactly
+                # how it read the first time this sweep ran.
+                tally["early_stopped"] += 1
+                print(f"[sweep] trial {trial} EARLY-STOPPED by the sweep "
+                      f"scheduler (hyperband) -- not an error.", flush=True)
+                raise
             if not first_error:
                 first_error.append(exc)
             print(f"[sweep] trial {trial} FAILED: {type(exc).__name__}: {exc}", flush=True)
@@ -258,6 +330,14 @@ def maybe_run_sweep(
             f"Sweep agent for {sweep_id} exited without starting a single trial. "
             f"The sweep is likely already finished/cancelled, or the id belongs to "
             f"another project/entity."
+        )
+    if tally["early_stopped"]:
+        print(f"[sweep] {tally['early_stopped']} trial(s) were early-stopped by the "
+              f"scheduler (expected with hyperband, not failures).", flush=True)
+    if tally["completed"] == 0 and tally["early_stopped"] == tally["started"]:
+        raise SweepConfigurationError(
+            f"All {tally['started']} trial(s) for {sweep_id} were early-stopped and "
+            f"none completed. Check early_terminate.min_iter against --epochs."
         )
     if tally["completed"] == 0:
         raise SweepConfigurationError(
