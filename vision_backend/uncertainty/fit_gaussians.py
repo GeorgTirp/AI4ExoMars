@@ -50,6 +50,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-path", required=True)
     parser.add_argument("--imagery-path", required=True)
     parser.add_argument("--label-path", required=True)
+    parser.add_argument(
+        "--cache-dir", default=None,
+        help="Padded-crop cache from prep_seg_crop_cache.py (same one the "
+             "training loader config points at). Reads crops out of a memmap "
+             "instead of re-decompressing mosaic windows.",
+    )
+    parser.add_argument(
+        "--max-crops", type=int, default=None,
+        help="Hard cap on crops scanned, on top of the --max-samples-per-class "
+             "early stop. Worth setting: that early stop only fires once EVERY "
+             "class has filled its quota, so a class with no pixels anywhere in "
+             "the label raster (e.g. Boulder fields in the Oxia mosaic) keeps it "
+             "from ever firing and the scan runs the whole split. Crops are "
+             "taken in manifest order, so a cap samples them spatially "
+             "clustered rather than at random.",
+    )
     parser.add_argument("--split", choices=["train", "val", "all"], default="train")
     parser.add_argument("--ignore-index", type=int, default=IGNORE_INDEX)
     parser.add_argument("--pixels-per-crop-per-class", type=int, default=50,
@@ -89,6 +105,7 @@ def main() -> int:
         label_path=args.label_path,
         augment=False,
         ignore_index=args.ignore_index,
+        cache_dir=args.cache_dir,
     )
 
     features_by_class: dict[int, list[torch.Tensor]] = {c: [] for c in range(num_classes)}
@@ -99,8 +116,12 @@ def main() -> int:
     except ModuleNotFoundError:
         from model.features import extract_pixel_features
 
+    scan_limit = len(dataset) if args.max_crops is None else min(args.max_crops, len(dataset))
+    if scan_limit < len(dataset):
+        print(f"Scanning at most {scan_limit}/{len(dataset)} crops (--max-crops)")
+
     with torch.no_grad():
-        for i in range(len(dataset)):
+        for i in range(scan_limit):
             if all(counts[c] >= args.max_samples_per_class for c in range(num_classes)):
                 print("All classes reached max-samples-per-class; stopping early.")
                 break

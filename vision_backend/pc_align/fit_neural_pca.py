@@ -45,6 +45,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest-path", required=True)
     parser.add_argument("--imagery-path", required=True)
     parser.add_argument("--label-path", required=True)
+    parser.add_argument(
+        "--cache-dir", default=None,
+        help="Padded-crop cache from prep_seg_crop_cache.py (same one the "
+             "training loader config points at). Reads crops out of a memmap "
+             "instead of re-decompressing mosaic windows -- a large speedup "
+             "for the full-manifest presence scan below, which touches every "
+             "crop in the split.",
+    )
+    parser.add_argument(
+        "--max-crops", type=int, default=None,
+        help="Stop the class-presence scan after this many crops. Bounds the "
+             "runtime on large manifests (the scan is otherwise one read per "
+             "crop over the whole split); note it takes them in manifest "
+             "order, so the sample is spatially clustered rather than random.",
+    )
     parser.add_argument("--split", choices=["train", "val", "all"], default="train")
     parser.add_argument("--ignore-index", type=int, default=IGNORE_INDEX)
     parser.add_argument("--presence-fraction", type=float, default=0.05,
@@ -96,11 +111,13 @@ def main() -> int:
         label_path=args.label_path,
         augment=False,
         ignore_index=args.ignore_index,
+        cache_dir=args.cache_dir,
     )
 
-    print("Scanning dataset for class presence...")
+    scan_limit = len(dataset) if args.max_crops is None else min(args.max_crops, len(dataset))
+    print(f"Scanning {scan_limit}/{len(dataset)} crops for class presence...")
     class_to_indices: dict[int, list[int]] = {c: [] for c in range(num_classes)}
-    for i in range(len(dataset)):
+    for i in range(scan_limit):
         label = dataset[i]["label"]
         valid = label != args.ignore_index
         total = int(valid.sum())
