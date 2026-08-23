@@ -14,55 +14,56 @@
 #   condor_submit_bid 30 tune_stage3.sub SWEEP_ID=geotir-university-of-t-bingen/noah_simmim/jokh82y0
 
 program: vision_backend/train_stage3_segmentation_finetune.py
-project: ai4exomars
 method: bayes
 
 metric:
   name: val/miou
   goal: maximize
 
-run_cap: 20
+run_cap: 10
 
-command:
-  - ${env}
-  - ${interpreter}
-  - -m
-  - vision_backend.train_stage3_segmentation_finetune
-  - --wandb
-  - --wandb-project
-  - ai4exomars
-  - --wandb-group
-  - stage3-hparam-sweep
-  - --wandb-job-type
-  - stage3-tune
-  - --encoder-checkpoint
-  - results/tune_stage2/best.pt
-  - --local-base-channels
-  - "32"
-  - --context-base-channels
-  - "16"
-  - --context-dim
-  - "192"
-  - --epochs
-  - "25"
-  - --batch-size
-  - "8"
-  - --num-workers
-  - "4"
-  - --use-muon
-  - --checkpoint-path
-  - results/tune_stage3/best.pt
-  - --history-path
-  - results/tune_stage3/history.csv
+# Kill unpromising trials early. val/miou is logged once per epoch with
+# step=epoch, which is what hyperband brackets on: it compares each trial
+# against its peers at epochs 3 and 9 and stops the stragglers, so the 10-epoch
+# budget is spent on trials that are actually going somewhere.
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 3
+
+# NOTE: no `command:` block on purpose. These sweeps run through
+# `maybe_run_sweep` in vision_backend/training/wandb_utils.py, which calls the
+# train function in-process; the fixed (non-swept) arguments therefore come from
+# the command line of `run_stage3_sweep.sh`, not from here. A `command:` block
+# would be silently ignored in that mode -- the previous one still pointed at
+# results/tune_stage2/best.pt and legacy --context-* args.
 
 # ── Optimizer hyperparameters ──────────────────────────────────────────────────
+#
+# IMPORTANT: these keys must match `build_config()` in
+# vision_backend/train_stage3_segmentation_finetune.py exactly. The previous
+# version of this file was written against the pre-Muon-split schema and was
+# never updated when commit 9a0039e split the optimizer; it swept
+# `optimization.learning_rate` / `weight_decay` (both dead on the --use-muon
+# path), `adam_beta1` / `adam_beta2` / `adam_eps` (renamed to `nadam_*`, and
+# eps is not a config key at all) and `muon_ns_steps` (never existed). Six of
+# nine parameters were silent no-ops, and muon_lr / nadam_lr -- the ones that
+# actually drove the NaN divergence -- were never searched. merge_wandb_config
+# now validates these names and raises instead of silently ignoring them.
 parameters:
-  optimization.learning_rate:
+  # The two that were never tuned. muon_lr is capped below the 8.7e-3 that
+  # diverged at end-of-warmup on the full manifest.
+  optimization.muon_lr:
     distribution: log_uniform_values
-    min: 1.0e-5
-    max: 1.0e-2
+    min: 1.0e-4
+    max: 5.0e-3
 
-  optimization.weight_decay:
+  optimization.nadam_lr:
+    distribution: log_uniform_values
+    min: 3.0e-5
+    max: 1.0e-3
+
+  optimization.muon_weight_decay:
     distribution: log_uniform_values
     min: 1.0e-5
     max: 0.1
@@ -72,29 +73,58 @@ parameters:
     min: 0.02
     max: 0.25
 
+  # Previously landed on 0.99 -- the exact top of its old range, which usually
+  # means the objective was insensitive to it rather than that 0.99 is right.
+  # At 5,924 steps/epoch on the full manifest, 0.99 averages over ~100 steps
+  # (a fraction of an epoch); on the 26-steps/epoch AOI it spanned ~4 epochs,
+  # so the swept value does not transfer. Range widened downward.
   optimization.muon_momentum:
     distribution: uniform
-    min: 0.85
-    max: 0.99
+    min: 0.80
+    max: 0.98
 
-  optimization.muon_ns_steps:
-    values: [3, 5, 7]
-
-  optimization.adam_beta1:
+  optimization.nadam_beta1:
     distribution: uniform
     min: 0.85
     max: 0.95
 
-  optimization.adam_beta2:
+  optimization.nadam_beta2:
     distribution: uniform
     min: 0.95
     max: 0.999
 
-  optimization.adam_eps:
-    distribution: log_uniform_values
-    min: 1.0e-9
-    max: 1.0e-6
+  optimization.grad_clip_norm:
+    values: [0.5, 1.0, 2.0]
+
+  optimization.muon_scope:
+    values: ["matrix", "all"]
 
 # ── Fine-tuning hyperparameters ────────────────────────────────────────────────
   initialization.freeze_encoder_epochs:
     values: [0, 3, 5, 10]
+
+# ── Stage-3 performance levers (F1-F5) ─────────────────────────────────────────
+# All default off/neutral in train_stage3_segmentation_finetune.py itself; the
+# axes below are what the implementation brief calls out as worth searching.
+# val/miou stays the sweep metric -- it now also logs val/miou_ig (F1) when
+# ig_loss_weight > 0, visible in the run but not the optimization target.
+  data.ig_loss_weight:
+    values: [0, 0.3, 0.5]
+
+  data.loss_kind:
+    values: ["ce", "logit_adjusted"]
+
+  optimization.llrd:
+    values: [1.0, 0.8, 0.7]
+
+  model.decoder_dropout:
+    values: [0, 0.1]
+
+  optimization.ema_decay:
+    values: [0, 0.9999]
+
+# ── M1: ASPP at the encoder bottleneck ─────────────────────────────────────────
+# Moderate lever (not one of the free F1-F5 ones above) -- included since it's
+# now implemented too. --aspp-rates itself isn't swept (default 6,12,18).
+  model.use_aspp:
+    values: [false, true]

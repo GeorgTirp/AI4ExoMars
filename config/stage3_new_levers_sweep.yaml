@@ -1,0 +1,51 @@
+# Wandb sweep config: which of the F1-M1 performance levers (IG aux head,
+# balanced-softmax/logit-adjusted loss, LLRD, decoder dropout, EMA, ASPP)
+# actually move val/miou, holding the already-tuned optimizer hyperparameters
+# fixed at the values that produced the verified 0.267 global-mIoU full-data
+# baseline (stage3_verify_winner_full_data.sh).
+#
+# Deliberately separate from stage3_segmentation_finetune_sweep.yaml, which
+# still searches the optimizer axes themselves -- mixing that search back in
+# here would confound "did this lever help" with "did we get a luckier
+# muon_lr this trial". run_stage3_new_levers_sweep.sh passes the winning
+# optimizer values as fixed CLI args for exactly that reason.
+#
+# Run:
+#   ./run_stage3_new_levers_sweep.sh                 # new sweep
+#   ./run_stage3_new_levers_sweep.sh <sweep_id>       # join existing
+
+program: vision_backend/train_stage3_segmentation_finetune.py
+method: bayes
+
+metric:
+  name: val/miou
+  goal: maximize
+
+run_cap: 12
+
+# Same brackets as stage3_segmentation_finetune_sweep.yaml (epoch 3 and 9)
+# -- both land comfortably inside the 25-epoch/trial budget this is meant to
+# run at (see EPOCHS in run_stage3_new_levers_sweep.sh).
+early_terminate:
+  type: hyperband
+  min_iter: 3
+  eta: 3
+
+parameters:
+  data.ig_loss_weight:
+    values: [0, 0.3, 0.5]
+
+  data.loss_kind:
+    values: ["ce", "logit_adjusted"]
+
+  optimization.llrd:
+    values: [1.0, 0.8, 0.7]
+
+  model.decoder_dropout:
+    values: [0, 0.1]
+
+  optimization.ema_decay:
+    values: [0, 0.9999]
+
+  model.use_aspp:
+    values: [false, true]
