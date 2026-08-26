@@ -129,6 +129,7 @@ def main() -> int:
                 class_to_indices[c].append(i)
 
     gallery: dict[int, dict[int, list]] = {}
+    bases: dict[int, "NeuralPCAResult"] = {}
 
     with torch.no_grad():
         for class_id, indices in class_to_indices.items():
@@ -152,13 +153,17 @@ def main() -> int:
 
             psi = torch.stack(psi_rows)
             pca = fit_class_pca(psi, class_id=class_id, n_components=args.n_components)
+            bases[class_id] = pca
             gallery[class_id] = build_gallery_entry(
                 pca, psi, thumbnails, source_ids, top_k=args.top_k
             )
 
     output = Path(args.output) if args.output else Path(args.checkpoint).with_suffix("").with_suffix(".npca.pt")
-    save_gallery(gallery, output)
-    print(f"Saved neural-PCA gallery ({len(gallery)} classes) to {output}")
+    # Bases go in alongside the thumbnails so a consumer can rank its OWN samples
+    # (e.g. the observation open in MarsObsLabeling) on these same components.
+    save_gallery(gallery, output, bases=bases)
+    print(f"Saved neural-PCA gallery ({len(gallery)} classes, "
+          f"{len(bases)} PCA bases) to {output}")
     return 0
 
 

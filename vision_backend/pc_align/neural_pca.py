@@ -164,15 +164,82 @@ def build_gallery_entry(
     return result
 
 
-def save_gallery(gallery: NeuralPCAGallery, path: str | Path) -> None:
+# Artifact schema version. v1 was a bare NeuralPCAGallery dict (thumbnails only);
+# v2 additionally carries the fitted per-class PCA bases, so a consumer can rank
+# *its own* samples on the same components instead of only viewing the training
+# corpus's top activations (MarsObsLabeling ranks the loaded observation's blocks).
+GALLERY_SCHEMA_VERSION = 2
+
+
+def save_gallery(
+    gallery: NeuralPCAGallery,
+    path: str | Path,
+    bases: dict[int, NeuralPCAResult] | None = None,
+) -> None:
+    """Write the gallery, and (v2) the fitted PCA bases alongside it.
+
+    The bases are what make the components reusable: a consumer holding them can
+    project new psi_k(x) onto the same directions the training corpus defined.
+    Without them the artifact can only ever show its own baked-in thumbnails.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(gallery, path)
+    torch.save(
+        {
+            "schema_version": GALLERY_SCHEMA_VERSION,
+            "gallery": gallery,
+            "bases": bases or {},
+        },
+        path,
+    )
 
 
 def load_gallery(path: str | Path) -> NeuralPCAGallery:
+    """The thumbnail gallery. Accepts both v1 (bare dict) and v2 artifacts."""
+    payload = _load_gallery_payload(path)
+    return payload["gallery"]
+
+
+def load_gallery_bases(path: str | Path) -> dict[int, NeuralPCAResult]:
+    """Fitted per-class PCA bases, or {} for a v1 artifact that predates them."""
+    return _load_gallery_payload(path)["bases"]
+
+
+def _load_gallery_payload(path: str | Path) -> dict:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"No fitted neural-PCA gallery at {path}")
     # weights_only=False: first-party artifact (dict of dataclasses + numpy arrays).
-    return torch.load(path, map_location="cpu", weights_only=False)
+    raw = torch.load(path, map_location="cpu", weights_only=False)
+    if isinstance(raw, dict) and "schema_version" in raw:
+        return {
+            "schema_version": int(raw["schema_version"]),
+            "gallery": raw.get("gallery", {}),
+            "bases": raw.get("bases", {}) or {},
+        }
+    # v1: the artifact WAS the gallery dict (keys are class ids).
+    return {"schema_version": 1, "gallery": raw, "bases": {}}
+
+
+def rank_indices_by_component(
+    psi: torch.Tensor, pca: NeuralPCAResult, *, top_k: int = 6
+) -> dict[int, list[tuple[int, float]]]:
+    """component_idx -> [(row index into psi, score), ...] best first.
+
+    The thumbnail-free half of `build_gallery_entry`: lets a caller rank its own
+    samples (e.g. every block of the observation currently open) on this class's
+    components and then fetch imagery for just the winners.
+    """
+    scores = project_onto_components(psi, pca)  # [N, L]
+    ranked: dict[int, list[tuple[int, float]]] = {}
+    for component_idx in range(scores.shape[1]):
+        comp = scores[:, component_idx]
+        k = min(top_k, comp.numel())
+        if k == 0:
+            ranked[component_idx] = []
+            continue
+        top_vals, top_idx = torch.topk(comp, k=k)
+        ranked[component_idx] = [
+            (int(top_idx[i]), float(top_vals[i])) for i in range(k)
+        ]
+    return ranked

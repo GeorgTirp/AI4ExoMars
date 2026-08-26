@@ -27,12 +27,34 @@ except ModuleNotFoundError:
     from model.features import extract_pixel_features
 
 
+def _same_device(a, b) -> bool:
+    """Device equality that treats an unindexed device as matching index 0.
+
+    `torch.device("mps") != torch.device("mps:0")` even though a tensor placed on
+    the former reports the latter, so a naive `==` would copy on every call.
+    """
+    a, b = torch.device(a), torch.device(b)
+    if a.type != b.type:
+        return False
+    if a.index is None or b.index is None:
+        return True
+    return a.index == b.index
+
+
 @dataclass
 class ClassGaussianStats:
     """Fitted Gaussian for one class's feature distribution."""
 
     mean: torch.Tensor  # [F]
     precision: torch.Tensor  # [F, F], (regularized covariance)^-1
+
+    def to(self, device) -> "ClassGaussianStats":
+        """Copy onto `device` (no-op if already there)."""
+        if _same_device(self.mean.device, device):
+            return self
+        return ClassGaussianStats(
+            mean=self.mean.to(device), precision=self.precision.to(device)
+        )
 
 
 @dataclass
@@ -45,6 +67,28 @@ class MahalanobisStats:
     # in-distribution scores) used to normalize raw distances to ~[0, 1] for
     # display. None until fit_class_gaussians sets it.
     reference_max_distance: float | None = None
+
+    @property
+    def device(self):
+        """Device the fitted tensors currently live on (None if there are no classes)."""
+        for class_stat in self.class_stats.values():
+            return class_stat.mean.device
+        return None
+
+    def to(self, device) -> "MahalanobisStats":
+        """Copy every fitted tensor onto `device` (no-op if already there).
+
+        `load_stats` always deserializes to CPU, so scoring features from a model
+        on cuda/mps needs this first -- otherwise the subtraction in
+        `_min_class_distance` raises "expected all tensors to be on the same device".
+        """
+        if self.device is not None and _same_device(self.device, device):
+            return self
+        return MahalanobisStats(
+            class_stats={c: s.to(device) for c, s in self.class_stats.items()},
+            feature_dim=self.feature_dim,
+            reference_max_distance=self.reference_max_distance,
+        )
 
 
 def fit_class_gaussians(
@@ -116,10 +160,66 @@ def fit_class_gaussians(
     return stats
 
 
+# Rows scored per chunk in the shared-covariance path. Bounds the [chunk, F]
+# temporaries: a full 4x512x512 feature map is ~1M rows, and materializing
+# x @ precision for all of them at once costs ~1 GB at F=256.
+_SCORE_CHUNK_ROWS = 1 << 16
+
+
+def _has_shared_precision(class_stats: list[ClassGaussianStats]) -> bool:
+    """True when every class shares one precision matrix (the default fit).
+
+    `fit_class_gaussians(shared_covariance=True)` stores the *same* tensor object
+    on every class, and torch.save/load preserves that aliasing, so the identity
+    check nearly always settles it without touching the data.
+    """
+    first = class_stats[0].precision
+    if all(cs.precision is first for cs in class_stats[1:]):
+        return True
+    return all(torch.equal(cs.precision, first) for cs in class_stats[1:])
+
+
+def _min_distance_shared(
+    features: torch.Tensor, class_stats: list[ClassGaussianStats], precision: torch.Tensor
+) -> torch.Tensor:
+    """Nearest-class Mahalanobis distance when all classes share one precision.
+
+    Expanding d_c^2 = (x - u_c)' P (x - u_c) = x'Px - 2x'Pu_c + u_c'Pu_c lets the
+    only expensive term (x'Px, an [N,F]x[F,F] matmul) be computed once for all
+    classes instead of once per class. The cross term is [N,F]x[F,C], which is
+    ~5% of that at C=13, F=256 -- so this is close to a C-fold reduction in work,
+    and it never materializes a per-class [N,F] difference tensor.
+    """
+    means = torch.stack([cs.mean for cs in class_stats])  # [C, F]
+    means_p = means @ precision  # [C, F]  (P is symmetric)
+    const = (means_p * means).sum(dim=1)  # [C]  u_c'Pu_c
+
+    out = []
+    for chunk in features.split(_SCORE_CHUNK_ROWS, dim=0):
+        chunk_p = chunk @ precision  # [n, F]  x'P
+        quad = (chunk_p * chunk).sum(dim=1)  # [n]    x'Px
+        cross = chunk_p @ means.t()  # [n, C]  x'Pu_c
+        d2 = quad.unsqueeze(1) - 2.0 * cross + const.unsqueeze(0)  # [n, C]
+        out.append(d2.min(dim=1).values.clamp_min(0.0).sqrt())
+    return torch.cat(out, dim=0)
+
+
 def _min_class_distance(features: torch.Tensor, stats: MahalanobisStats) -> torch.Tensor:
     """Per-sample Mahalanobis distance to the nearest class Gaussian. features: [N, F] -> [N]."""
+    # Stats come off disk on CPU while features follow the model (cuda/mps).
+    # Callers scoring in bulk should hoist `stats.to(device)` out of their loop;
+    # this keeps one-off callers correct rather than raising a device mismatch.
+    stats = stats.to(features.device)
+    class_stats = list(stats.class_stats.values())
+    if not class_stats:
+        raise ValueError("MahalanobisStats has no fitted classes to score against")
+
+    if _has_shared_precision(class_stats):
+        return _min_distance_shared(features, class_stats, class_stats[0].precision)
+
+    # Per-class covariance: no shared term to hoist, score one class at a time.
     distances = []
-    for class_stat in stats.class_stats.values():
+    for class_stat in class_stats:
         diff = features - class_stat.mean  # [N, F]
         # d^2 = diff @ precision @ diff^T, computed row-wise without materializing [N,N]
         d2 = torch.einsum("nf,fg,ng->n", diff, class_stat.precision, diff)
