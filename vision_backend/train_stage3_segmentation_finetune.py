@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 import json
 try:
     from vision_backend.training.wandb_utils import (
@@ -209,7 +210,41 @@ def parse_args() -> argparse.Namespace:
              "as the checkpoint. Suggested on-value: 0.9999.",
     )
     parser.add_argument("--freeze-encoder-epochs", type=int, default=5)
-    parser.add_argument("--encoder-checkpoint", required=True)
+    parser.add_argument("--encoder-checkpoint", default=None,
+                        help="Pretrained encoder to initialise from. Not required "
+                             "with --random-init-encoder.")
+    parser.add_argument(
+        "--context-cache-dir", default=None,
+        help="Context crop cache from prep_seg_context_cache.py, index-aligned "
+             "with the seg manifest. Used with --use-context; without it the "
+             "loader falls back to a live per-item read (dev smoke only).",
+    )
+    parser.add_argument(
+        "--variant-id", default=None,
+        help="Label for the model-variant comparison (v0..v3); recorded in the "
+             "metrics row and logged to wandb.",
+    )
+    parser.add_argument(
+        "--variant-metrics-path", default=None,
+        help="Append this run's params/throughput/memory measurements as a JSON "
+             "line here, for collect_variant_comparison.py.",
+    )
+    parser.add_argument(
+        "--random-init-encoder", action="store_true",
+        help="Train the encoder from random init: skip the checkpoint load "
+             "entirely. Also forces llrd=1.0 and freeze_encoder_epochs=0, since "
+             "both exist to protect pretrained weights and there are none.",
+    )
+    parser.add_argument(
+        "--use-context", dest="use_context", action="store_true", default=None,
+        help="Run the context-aware encoder with its context branch (model-kind "
+             "context only). Requires the loader to supply context crops.",
+    )
+    parser.add_argument(
+        "--no-use-context", dest="use_context", action="store_false",
+        help="Run the context-aware encoder as a single (local) branch: no "
+             "context sub-encoder, no FiLM conditioning, no context crops needed.",
+    )
     parser.add_argument("--strict-checkpoint-load", action="store_true")
     # simmim (single-branch HybridEncoder) hyperparameters
     parser.add_argument("--global-base-grid", type=int, default=32)
@@ -310,6 +345,10 @@ def build_config(args: argparse.Namespace) -> dict:
             "num_workers": args.num_workers,
             "num_classes": args.num_classes,
             "ignore_index": args.ignore_index,
+            # Context crops for the context-aware encoder; None keeps the
+            # loader on its existing (context-free) path.
+            "use_context": bool(args.use_context),
+            "context_cache_dir": args.context_cache_dir,
             "loss_kind": args.loss_kind,
             "focal_gamma": args.focal_gamma,
             "logit_adjust_tau": args.logit_adjust_tau,
@@ -346,11 +385,19 @@ def build_config(args: argparse.Namespace) -> dict:
             "swin_depths": tuple(args.swin_depths),
             "swin_num_heads": tuple(args.swin_num_heads),
             "use_stage32": not args.disable_stage32,
+            # None -> leave the encoder family default (context on); the
+            # variant sweeps set it explicitly.
+            **({} if args.use_context is None else {"use_context": args.use_context}),
         },
         "initialization": {
             "encoder_checkpoint": args.encoder_checkpoint,
             "strict_checkpoint_load": args.strict_checkpoint_load,
-            "freeze_encoder_epochs": args.freeze_encoder_epochs,
+            "freeze_encoder_epochs": (
+                0 if args.random_init_encoder else args.freeze_encoder_epochs
+            ),
+            "random_init_encoder": args.random_init_encoder,
+            "variant_id": args.variant_id,
+            "variant_metrics_path": args.variant_metrics_path,
         },
         "optimization": {
             "epochs": args.epochs,
@@ -497,6 +544,12 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             "contrast_jitter": float(data_config.get("contrast_jitter", 0.15)),
         }
     )
+    # Only pass the context knobs when the run actually wants context, so a
+    # loader factory without those parameters is unaffected.
+    if data_config.get("use_context"):
+        loader_kwargs["use_context"] = True
+        if data_config.get("context_cache_dir"):
+            loader_kwargs["context_cache_dir"] = data_config["context_cache_dir"]
     loaders = load_loader_bundle(data_config["loader_factory"], loader_kwargs)
     if "train" not in loaders or "val" not in loaders:
         raise KeyError("Loader bundle must contain at least `train` and `val` loaders.")
@@ -574,21 +627,39 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             )
 
     model_kind = model_config.get("model_kind", "simmim")
-    encoder_ckpt = resolve_path(initialization["encoder_checkpoint"])
     strict = bool(initialization["strict_checkpoint_load"])
+    random_init = bool(initialization.get("random_init_encoder", False))
+
     if model_kind == "simmim":
         model = build_simmim_segmentation_model(model_config).to(device)
-        load_simmim_encoder_checkpoint(
-            torch, model.encoder, encoder_ckpt, prefer_ema=True, strict=strict
-        )
     elif model_kind == "context":
         model = build_context_segmentation_model(model_config).to(device)
-        load_encoder_from_pretrainer_checkpoint(
-            torch, model.encoder, encoder_ckpt, strict=strict
-        )
     else:
         raise ValueError(f"Unknown model_kind: {model_kind!r} (expected simmim|context).")
-    print(f"Model kind: {model_kind}")
+
+    if random_init:
+        # Nothing pretrained to preserve, so the mechanisms that exist to protect
+        # pretrained weights are meaningless here and are forced off in
+        # train_stage(); see the llrd / freeze_encoder_epochs overrides.
+        print("[stage3] Encoder trained FROM SCRATCH (--random-init-encoder): "
+              "no checkpoint loaded.")
+    else:
+        if not initialization.get("encoder_checkpoint"):
+            raise ValueError(
+                "--encoder-checkpoint is required unless --random-init-encoder is set."
+            )
+        encoder_ckpt = resolve_path(initialization["encoder_checkpoint"])
+        if model_kind == "simmim":
+            load_simmim_encoder_checkpoint(
+                torch, model.encoder, encoder_ckpt, prefer_ema=True, strict=strict
+            )
+        else:
+            load_encoder_from_pretrainer_checkpoint(
+                torch, model.encoder, encoder_ckpt, strict=strict
+            )
+    print(f"Model kind: {model_kind}"
+          + (f" (context branch {'ON' if getattr(model, 'use_context', True) else 'OFF'})"
+             if model_kind == "context" else ""))
 
     if bool(runtime.get("channels_last", False)):
         model = model.to(memory_format=torch.channels_last)
@@ -676,6 +747,13 @@ def train_stage(config: dict, wandb_run=None) -> dict:
 
     history_rows: list[dict[str, float]] = []
     best_val_miou = float("-inf")
+    # C4: reported alongside DC mIoU so a variant's IG-level score is
+    # comparable too; stays None when the IG aux head is off.
+    best_val_miou_ig = None
+    # Mean wall-clock per training epoch / step, for the cost half of the
+    # variant comparison. Measured, not estimated from FLOPs.
+    _epoch_seconds: list[float] = []
+    _epoch_steps: list[int] = []
     best_epoch = 0
     start_epoch = 1
     encoder_unfrozen = False
@@ -716,6 +794,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         freeze_module(base_model.encoder)
 
     for epoch in range(start_epoch, int(optimization["epochs"]) + 1):
+        _epoch_start = time.time()
         if freeze_encoder_epochs > 0 and epoch > freeze_encoder_epochs and not encoder_unfrozen:
             unfreeze_module(base_model.encoder)
             encoder_unfrozen = True
@@ -814,6 +893,14 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             f"lr={current_lr:.3e}"
         )
 
+        _epoch_seconds.append(time.time() - _epoch_start)
+        _epoch_steps.append(max(1, len(loaders["train"])))
+        if "ig_miou" in val_metrics:
+            ig_now = float(val_metrics["ig_miou"])
+            best_val_miou_ig = (
+                ig_now if best_val_miou_ig is None else max(best_val_miou_ig, ig_now)
+            )
+
         if float(val_metrics["miou"]) > best_val_miou:
             best_val_miou = float(val_metrics["miou"])
             best_epoch = epoch
@@ -833,6 +920,64 @@ def train_stage(config: dict, wandb_run=None) -> dict:
                 checkpoint_state["optimizer_state"] = optimizer.state_dict()
                 checkpoint_state["scheduler_state"] = scheduler.state_dict()
             save_checkpoint(torch, checkpoint_state, checkpoint_path)
+
+    # Epoch wall-clock includes validation; dividing by train steps gives a
+    # consistent per-step figure across variants, which is what is compared.
+    mean_train_step_ms = (
+        (sum(_epoch_seconds) / sum(_epoch_steps)) * 1000.0
+        if _epoch_seconds and sum(_epoch_steps)
+        else None
+    )
+
+    # --- C4: per-run measurements for the variant comparison ----------------
+    try:
+        from vision_backend.training.variant_metrics import (
+            measure_inference_throughput,
+            parameter_breakdown,
+            peak_memory_gb,
+            write_variant_row,
+        )
+    except ModuleNotFoundError:
+        from training.variant_metrics import (
+            measure_inference_throughput,
+            parameter_breakdown,
+            peak_memory_gb,
+            write_variant_row,
+        )
+
+    variant_row = {
+        "variant_id": data_config.get("variant_id"),
+        "run_name": getattr(wandb_run, "name", None),
+        "run_id": getattr(wandb_run, "id", None),
+        "model_kind": model_kind,
+        "use_context": bool(model_config.get("use_context", True)),
+        "local_base_channels": model_config.get("local_base_channels"),
+        "decoder_channels": model_config.get("decoder_channels"),
+        "epochs": int(optimization["epochs"]),
+        "best_val_miou": best_val_miou,
+        "best_val_miou_ig": best_val_miou_ig,
+        "best_epoch": best_epoch,
+        "train_step_ms": mean_train_step_ms,
+        "peak_mem_gb": peak_memory_gb(torch, device),
+        **parameter_breakdown(model),
+    }
+    try:
+        variant_row.update(
+            measure_inference_throughput(
+                torch, model, device,
+                input_size=int(data_config.get("crop_size", 512)),
+                batch_size=2,
+                needs_context=bool(model_config.get("use_context", True)),
+            )
+        )
+    except Exception as exc:  # never fail a finished run over a benchmark
+        print(f"[stage3] inference throughput measurement skipped: {exc}")
+
+    log_metrics(wandb_run, {f"variant/{k}": v for k, v in variant_row.items()
+                            if isinstance(v, (int, float))})
+    if data_config.get("variant_metrics_path"):
+        write_variant_row(data_config["variant_metrics_path"], variant_row)
+        print(f"[stage3] variant row -> {data_config['variant_metrics_path']}")
 
     save_history(history_rows, history_path)
     final_metrics = {

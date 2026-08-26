@@ -253,9 +253,14 @@ class ContextAwareSegmentationModel(nn.Module):
         decoder_dropout: float = 0.0,
         use_aspp: bool = False,
         aspp_rates: Sequence[int] = (6, 12, 18),
+        use_context: bool = True,
     ):
         super().__init__()
         self.encoder = encoder
+        # Mirrors the encoder's own toggle: with use_context=False this is a
+        # single-branch model that happens to share the two-branch encoder family,
+        # so a context on/off comparison differs ONLY in the context mechanism.
+        self.use_context = use_context
         self.decoder = LightweightSegmentationDecoder(
             bottleneck_channels=bottleneck_channels,
             skip8_channels=skip8_channels,
@@ -282,12 +287,18 @@ class ContextAwareSegmentationModel(nn.Module):
     ):
         """Same DC-logits-only contract as SingleBranchSegmentationModel.forward
         (see its docstring); `return_ig` behaves identically here."""
-        if context_x is None:
+        if self.use_context and context_x is None:
             raise ValueError(
-                "ContextAwareSegmentationModel expects both local_x and context_x."
+                "ContextAwareSegmentationModel was built with use_context=True but "
+                "got context_x=None. Provide a context crop (see the context crop "
+                "cache), or build the model with use_context=False."
             )
 
-        features = self.encoder(local_x, context_x)
+        features = (
+            self.encoder(local_x, context_x)
+            if self.use_context
+            else self.encoder(local_x)
+        )
         bottleneck = features[self.bottleneck_index]
         skip8 = features[self.skip8_index]
         skip4 = features[self.skip4_index]

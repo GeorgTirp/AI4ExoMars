@@ -968,10 +968,16 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
         swin_num_heads: Sequence[int] = (4, 8, 16),
         window_size: int = 8,
         drop_path: float = 0.0,
+        use_context: bool = True,
     ):
         super().__init__()
 
         self.use_stage32 = use_stage32
+        # use_context=False runs this as a single (local) branch: no context
+        # sub-encoder, no FiLM conditioning, no context parameters at all. Lets the
+        # same encoder family serve both arms of a context on/off comparison, so
+        # the only difference between them is the context mechanism itself.
+        self.use_context = use_context
 
         self.local_encoder = ConvNeXtSwinEncoder(
             in_channels=in_channels,
@@ -983,11 +989,15 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
             drop_path=drop_path,
         )
 
-        self.context_encoder = LightweightContextEncoder(
-            in_channels=in_channels,
-            base_channels=context_base_channels,
-            depth_per_stage=1,
-            context_dim=context_dim,
+        self.context_encoder = (
+            LightweightContextEncoder(
+                in_channels=in_channels,
+                base_channels=context_base_channels,
+                depth_per_stage=1,
+                context_dim=context_dim,
+            )
+            if use_context
+            else None
         )
 
         c1 = local_base_channels          # x1: 1/2
@@ -998,18 +1008,18 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
 
         # I would not condition the very earliest x1 feature at first.
         # It may inject context into very local texture too aggressively.
-        self.film_x2 = ContextFiLM2d(c2, context_dim)
-        self.film_x3 = ContextFiLM2d(c3, context_dim)
-        self.film_x4 = ContextFiLM2d(c3, context_dim)
-        self.film_x5 = ContextFiLM2d(c4, context_dim)
-
-        if use_stage32:
-            self.film_x6 = ContextFiLM2d(c5, context_dim)
+        if use_context:
+            self.film_x2 = ContextFiLM2d(c2, context_dim)
+            self.film_x3 = ContextFiLM2d(c3, context_dim)
+            self.film_x4 = ContextFiLM2d(c3, context_dim)
+            self.film_x5 = ContextFiLM2d(c4, context_dim)
+            if use_stage32:
+                self.film_x6 = ContextFiLM2d(c5, context_dim)
 
     def forward(
         self,
         local_x: torch.Tensor,
-        context_x: torch.Tensor,
+        context_x: Optional[torch.Tensor] = None,
     ):
         """
         Parameters
@@ -1021,11 +1031,23 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
         context_x:
             Larger surrounding crop already downsampled.
             Example: original 2048×2048 context crop resized to [B, C, 512, 512]
+            Ignored (and may be None) when ``use_context=False``.
 
         Returns
         -------
         Feature pyramid for the decoder.
         """
+
+        if not self.use_context:
+            # Single-branch: the local pyramid straight through, unconditioned.
+            return self.local_encoder(local_x)
+
+        if context_x is None:
+            raise ValueError(
+                "ContextAwareConvNeXtSwinEncoder was built with use_context=True "
+                "but forward() got context_x=None. Pass a context crop, or build "
+                "the encoder with use_context=False."
+            )
 
         context_vector = self.context_encoder(context_x)
 

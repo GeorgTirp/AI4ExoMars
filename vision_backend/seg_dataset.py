@@ -24,6 +24,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
 import torch
 from rasterio.windows import Window, from_bounds
 from torch.utils.data import DataLoader, Dataset
@@ -270,6 +271,10 @@ class SegmentationCropDataset(Dataset):
         brightness_jitter: float = 0.15,
         contrast_jitter: float = 0.15,
         cache_dir: Optional[str | Path] = None,
+        use_context: bool = False,
+        context_cache_dir: Optional[str | Path] = None,
+        context_size: int = 2048,
+        context_output_size: int = 512,
     ):
         self.records = list(records)
         self.imagery_path = str(imagery_path)
@@ -301,6 +306,34 @@ class SegmentationCropDataset(Dataset):
                     f"(built from {meta.get('manifest')!r}); rebuild the cache "
                     f"with --jitter-margin >= {self.spatial_jitter_px}."
                 )
+
+        # --- context branch (off by default: Phase-1 loading is untouched) ---
+        # A wide window centred on the crop, downsampled, for the context-aware
+        # encoder's second branch. Served from prep_seg_context_cache.py's
+        # context.npy (index-aligned with this manifest), or read live -- the
+        # live path is a dev convenience so a one-batch smoke runs without the
+        # cache, not something to train on (it re-reads a 2048px window per item).
+        self.use_context = bool(use_context)
+        self.context_size = int(context_size)
+        self.context_output_size = int(context_output_size)
+        self.context_cache_dir = (
+            Path(context_cache_dir) if context_cache_dir is not None else None
+        )
+        self._cache_context = None
+        if self.context_cache_dir is not None:
+            cmeta = json.loads(
+                (self.context_cache_dir / "context_meta.json").read_text()
+            )
+            if int(cmeta["count"]) != len(self.records):
+                raise ValueError(
+                    f"context cache has {cmeta['count']} rows but this split has "
+                    f"{len(self.records)} records; it was built from "
+                    f"{cmeta.get('manifest')!r}. Rows are addressed by "
+                    f"rec.index, so a mismatched cache would pair crops with "
+                    f"the wrong neighbourhood."
+                )
+            self.context_size = int(cmeta["context_size"])
+            self.context_output_size = int(cmeta["context_output_size"])
 
     def __len__(self) -> int:
         return len(self.records)
@@ -396,7 +429,49 @@ class SegmentationCropDataset(Dataset):
 
         image = torch.from_numpy(np.ascontiguousarray(x)).unsqueeze(0)  # (1, S, S)
         label = torch.from_numpy(np.ascontiguousarray(target)).long()   # (S, S)
-        return {"image": image, "label": label, "index": index}
+        sample = {"image": image, "label": label, "index": index}
+
+        if self.use_context:
+            ctx = self._read_context(rec)
+            # Normalized exactly like the local crop, so both branches see the
+            # same input distribution.
+            ctx = ctx.astype(np.float32) / 127.5 - 1.0
+            sample["context"] = torch.from_numpy(
+                np.ascontiguousarray(ctx)
+            ).unsqueeze(0)  # (1, O, O)
+        return sample
+
+    def _read_context(self, rec: SegCropRecord) -> np.ndarray:
+        """The downsampled context window for this record, cache or live."""
+        if self.context_cache_dir is not None:
+            if self._cache_context is None:
+                self._cache_context = np.load(
+                    self.context_cache_dir / "context.npy", mmap_mode="r"
+                )
+            # Addressed by rec.index, which is why the cache must be built from
+            # this same manifest -- see prep_seg_context_cache.py.
+            return np.asarray(self._cache_context[rec.index])
+        return self._read_context_live(rec)
+
+    def _read_context_live(self, rec: SegCropRecord) -> np.ndarray:
+        """Dev fallback: read the context window straight from the raster.
+
+        Lets a one-batch smoke run before the cache exists. Far too slow to
+        train on -- it re-reads and downsamples a `context_size` window per item.
+        """
+        try:
+            from vision_backend.prep_seg_context_cache import context_window
+        except ModuleNotFoundError:
+            from prep_seg_context_cache import context_window
+
+        img_ds, _ = self._readers()
+        win = context_window(rec, self.context_size)
+        return img_ds.read(
+            1, window=win,
+            out_shape=(self.context_output_size, self.context_output_size),
+            boundless=True, fill_value=0,
+            resampling=Resampling.average,
+        )
 
     def __del__(self):
         for ds in (self._img, self._lab):
@@ -441,6 +516,10 @@ def create_segmentation_dataloaders(
     cache_dir: Optional[str | Path] = None,
     train_fraction: float = 1.0,
     val_fraction: float = 1.0,
+    use_context: bool = False,
+    context_cache_dir: Optional[str | Path] = None,
+    context_size: int = 2048,
+    context_output_size: int = 512,
 ) -> SegLoaders:
     records = load_seg_records(manifest_path)
     train_records, val_records = partition_records(records)
@@ -465,15 +544,19 @@ def create_segmentation_dataloaders(
     train_records = _subsample(train_records, float(train_fraction), "train")
     val_records = _subsample(val_records, float(val_fraction), "val")
 
+    context_kwargs = dict(
+        use_context=use_context, context_cache_dir=context_cache_dir,
+        context_size=context_size, context_output_size=context_output_size,
+    )
     train_dataset = SegmentationCropDataset(
         train_records, imagery_path=imagery_path, label_path=label_path, augment=augment,
         spatial_jitter_px=spatial_jitter_px, brightness_jitter=brightness_jitter,
-        contrast_jitter=contrast_jitter, cache_dir=cache_dir,
+        contrast_jitter=contrast_jitter, cache_dir=cache_dir, **context_kwargs,
     )
     val_dataset = (
         SegmentationCropDataset(
             val_records, imagery_path=imagery_path, label_path=label_path, augment=False,
-            cache_dir=cache_dir,
+            cache_dir=cache_dir, **context_kwargs,
         )
         if val_records
         else None

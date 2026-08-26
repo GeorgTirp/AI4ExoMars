@@ -34,6 +34,7 @@ def build_context_encoder(model_config: dict[str, Any]) -> ContextAwareConvNeXtS
         swin_num_heads=tuple(model_config["swin_num_heads"]),
         window_size=model_config["window_size"],
         drop_path=model_config.get("drop_path", 0.0),
+        use_context=bool(model_config.get("use_context", True)),
     )
 
 
@@ -84,6 +85,7 @@ def build_context_segmentation_model(model_config: dict[str, Any]) -> ContextAwa
         decoder_dropout=model_config.get("decoder_dropout", 0.0),
         use_aspp=model_config.get("use_aspp", False),
         aspp_rates=model_config.get("aspp_rates", (6, 12, 18)),
+        use_context=bool(model_config.get("use_context", True)),
     )
 
 

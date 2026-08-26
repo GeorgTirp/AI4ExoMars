@@ -1,0 +1,49 @@
+# Wandb sweep — model-variant comparison, V1: big encoder, context on.
+# (context on top of the reference)
+#
+# !! REQUIRES THE CONTEXT CROP CACHE !!
+# This variant's loader must serve a context crop per sample. Build the cache
+# first (SERVER_LAUNCH.md step 1, prep_seg_context_cache.py); without it the
+# launcher falls back to a live per-item 2048px read, which is far too slow to
+# train on.
+#
+# Everything except the architecture is held constant across V0-V3; see
+# MODEL_VARIANTS_EXPERIMENT.md §5. Only {width, use_context} differ BETWEEN
+# variants, and only {learning_rate, weight_decay} are searched WITHIN one.
+#
+# Fixed architecture for this variant (supplied by run_variant_sweep.sh, not here --
+# these sweeps run in-process through maybe_run_sweep, so a `command:` block would
+# be silently ignored, exactly as noted in stage3_segmentation_finetune_sweep.yaml):
+#   --model-kind context  --use-context  --random-init-encoder
+#   --local-base-channels 52  --context-base-channels 26
+#   --context-dim 256  --decoder-channels 256
+#
+# Initialise:
+#   wandb sweep --project ai4exomars config/variant_v1_sweep.yaml
+# Then submit agents: see vision_backend/training/SERVER_LAUNCH.md
+
+program: vision_backend/train_stage3_segmentation_finetune.py
+method: bayes
+
+metric:
+  name: val/miou
+  goal: maximize
+
+run_cap: 4
+
+# No early_terminate: with only 4 runs per variant there is nothing to compare a
+# straggler against, and killing one would leave the variant with fewer samples
+# than its peers -- which would bias the between-variant comparison this exists for.
+
+parameters:
+  # The single-optimizer path (--use-muon off) is used for these runs, so these
+  # two keys are the live ones; muon_lr/nadam_lr would be dead here.
+  optimization.learning_rate:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 3.0e-3
+
+  optimization.weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-4
+    max: 1.0e-1

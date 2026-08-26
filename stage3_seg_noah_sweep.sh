@@ -90,6 +90,7 @@ PY
 # default only resolves when cwd is inside vision_backend/).
 python -m vision_backend.train_stage3_segmentation_finetune \
   --model-kind simmim \
+  --use-muon \
   --encoder-checkpoint "$ENCODER_CKPT" \
   --loader-factory vision_backend.seg_dataset:create_segmentation_dataloaders \
   --loader-config-path "$LOADER_CONFIG" \
