@@ -27,22 +27,55 @@ set -euo pipefail
 #   MAX_CROPS=0 ./fit_calibration_artifacts.sh           # 0 = no cap, full split
 # ---------------------------------------------------------------------------
 
-AI4EXOMARS_ROOT="/home/georg/Documents/ESA/AI4ExoMars"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AI4EXOMARS_ROOT="${AI4EXOMARS_ROOT:-$SCRIPT_DIR}"
 cd "$AI4EXOMARS_ROOT"
-source .venv/bin/activate
+
+# Activate the venv if there is one and we are not already inside it.
+if [[ -z "${VIRTUAL_ENV:-}" && -f .venv/bin/activate ]]; then
+  source .venv/bin/activate
+fi
 
 CHECKPOINT="${CHECKPOINT:-checkpoints/stage3_segmentation_full_verify_50ep.pt}"
 DERIVED="data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived"
-MANIFEST="$DERIVED/seg_crops_DC_full.csv"
-IMAGERY="$DERIVED/drg_on_label_grid.tif"
-LABELS="$DERIVED/labels_DC_classid.tif"
-CACHE_DIR="$DERIVED/seg_crop_cache_full"
+MANIFEST="${MANIFEST:-$DERIVED/seg_crops_DC_full.csv}"
+IMAGERY="${IMAGERY:-$DERIVED/drg_on_label_grid.tif}"
+LABELS="${LABELS:-$DERIVED/labels_DC_classid.tif}"
+CACHE_DIR="${CACHE_DIR:-$DERIVED/seg_crop_cache_full}"
 SPLIT="${SPLIT:-train}"
 MAX_CROPS="${MAX_CROPS:-4000}"
 
 if [[ ! -f "$CHECKPOINT" ]]; then
   echo "Checkpoint not found: $CHECKPOINT" >&2
   exit 1
+fi
+
+for required in "$MANIFEST" "$IMAGERY" "$LABELS"; do
+  if [[ ! -f "$required" ]]; then
+    echo "Required input not found: $required" >&2
+    if [[ "$required" == "$MANIFEST" ]]; then
+      echo >&2
+      echo "Build it (deterministic -- the val split is the rightmost" >&2
+      echo "--val-fraction of columns, no RNG, so this reproduces the" >&2
+      echo "manifest the model was trained against):" >&2
+      echo >&2
+      echo "  python -m vision_backend.prep_seg_crops \\" >&2
+      echo "    --imagery $IMAGERY \\" >&2
+      echo "    --labels  $LABELS \\" >&2
+      echo "    --crop-size 512 --min-label-frac 0.5 --val-fraction 0.15 \\" >&2
+      echo "    --out $MANIFEST" >&2
+    fi
+    exit 1
+  fi
+done
+
+# The padded-crop cache is optional: it only avoids re-decompressing mosaic
+# windows. Without it both scripts still run, just slower.
+CACHE_ARGS=()
+if [[ -d "$CACHE_DIR" ]]; then
+  CACHE_ARGS=(--cache-dir "$CACHE_DIR")
+else
+  echo "No crop cache at $CACHE_DIR -- reading windows from the mosaic (slower)."
 fi
 
 MAX_CROPS_ARGS=()
@@ -52,7 +85,9 @@ fi
 
 echo "Checkpoint: $CHECKPOINT"
 echo "Split: $SPLIT   max-crops: ${MAX_CROPS} (0 = uncapped)"
-nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader || true
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader || true
+fi
 
 echo
 echo "=================================================================="
@@ -63,9 +98,9 @@ python vision_backend/uncertainty/fit_gaussians.py \
   --manifest-path "$MANIFEST" \
   --imagery-path "$IMAGERY" \
   --label-path "$LABELS" \
-  --cache-dir "$CACHE_DIR" \
+  ${CACHE_ARGS[@]+"${CACHE_ARGS[@]}"} \
   --split "$SPLIT" \
-  "${MAX_CROPS_ARGS[@]}"
+  ${MAX_CROPS_ARGS[@]+"${MAX_CROPS_ARGS[@]}"}
 
 echo
 echo "=================================================================="
@@ -81,9 +116,9 @@ python vision_backend/pc_align/fit_neural_pca.py \
   --manifest-path "$MANIFEST" \
   --imagery-path "$IMAGERY" \
   --label-path "$LABELS" \
-  --cache-dir "$CACHE_DIR" \
+  ${CACHE_ARGS[@]+"${CACHE_ARGS[@]}"} \
   --split "$SPLIT" \
-  "${MAX_CROPS_ARGS[@]}"
+  ${MAX_CROPS_ARGS[@]+"${MAX_CROPS_ARGS[@]}"}
 
 echo
 echo "Done. Artifacts next to the checkpoint:"
