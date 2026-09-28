@@ -202,7 +202,16 @@ def _compute_segmentation_metrics(
     num_classes: int,
     ignore_index: int,
 ) -> dict[str, float]:
-    """Pixel accuracy and mean IoU for one batch.
+    """Pixel accuracy and mean IoU for ONE batch.
+
+    Retained for callers that genuinely want a per-batch reading. Do NOT build
+    an epoch metric by averaging this: IoU is a ratio of pixel counts, so the
+    mean of per-batch mIoUs is not the dataset mIoU. Each batch also averages
+    over whichever classes happen to appear in it, which silently reweights
+    rare classes by how often they co-occur. `run_segmentation_epoch`
+    accumulates a global confusion matrix instead -- see
+    `_accumulate_confusion` / `_metrics_from_confusion`, and
+    scripts/eval_global_miou.py for the same computation offline.
 
     Built from a single fused confusion matrix rather than a per-class mask
     loop. The loop cost two device syncs per class -- every `.item()` drains
@@ -249,6 +258,64 @@ def _compute_segmentation_metrics(
         if total_valid == 0:
             return {"pixel_acc": 0.0, "miou": 0.0}
         return {"pixel_acc": float(pixel_acc), "miou": float(miou)}
+
+
+def _accumulate_confusion(
+    torch_module,
+    conf,
+    logits,
+    targets,
+    num_classes: int,
+    ignore_index: int,
+):
+    """Add one batch's counts into `conf` (num_classes x num_classes, rows =
+    target, cols = prediction), entirely on-device.
+
+    No `.item()` and no host transfer, so this costs the training loop nothing
+    per step; the single sync happens once per epoch in
+    `_metrics_from_confusion`.
+    """
+    with torch_module.no_grad():
+        preds = logits.argmax(dim=1)
+        valid = targets != ignore_index
+        # argmax is always in [0, num_classes); guard the target side so a
+        # stray out-of-range label cannot land in the wrong cell.
+        in_range = valid & (targets >= 0) & (targets < num_classes)
+        t = targets[in_range].reshape(-1)
+        p = preds[in_range].reshape(-1)
+        conf += torch_module.bincount(
+            t * num_classes + p, minlength=num_classes * num_classes,
+        ).reshape(num_classes, num_classes)
+    return conf
+
+
+def _metrics_from_confusion(torch_module, conf) -> dict[str, float]:
+    """Global pixel accuracy and mean IoU from one accumulated confusion matrix.
+
+    This is the dataset-level definition -- per-class intersection and union
+    summed over every pixel of the split, then averaged over the classes that
+    actually occur. It is what scripts/eval_global_miou.py reports and what the
+    NOAH-H paper's numbers mean.
+    """
+    with torch_module.no_grad():
+        intersection = conf.diagonal()
+        union = conf.sum(0) + conf.sum(1) - intersection
+        present = union > 0
+        total = conf.sum()
+        iou = torch_module.where(
+            present,
+            intersection.double() / union.clamp_min(1).double(),
+            torch_module.zeros_like(union, dtype=torch_module.float64),
+        )
+        stats = torch_module.stack([
+            intersection.sum().double() / total.clamp_min(1).double(),
+            iou.sum() / present.sum().clamp_min(1).double(),
+            total.double(),
+        ]).tolist()
+    pixel_acc, miou, total_valid = stats
+    if total_valid == 0:
+        return {"pixel_acc": 0.0, "miou": 0.0}
+    return {"pixel_acc": float(pixel_acc), "miou": float(miou)}
 
 
 def compute_class_weights(
@@ -550,11 +617,24 @@ def run_segmentation_epoch(
 
     total_samples = 0
     total_loss = 0.0
-    total_pixel_acc = 0.0
-    total_miou = 0.0
-    total_pixel_acc_ig = 0.0
-    total_miou_ig = 0.0
     num_batches = len(dataloader)
+    # Global confusion matrices, accumulated across the whole split. Averaging
+    # per-batch mIoUs (the previous behaviour) is not the dataset mIoU: IoU is a
+    # ratio of pixel counts, and each batch averaged over only the classes
+    # present in it, so rare classes were weighted by their co-occurrence rate.
+    # That number selected the best epoch, the best trial per variant, and the
+    # v0-v3 ranking itself.
+    conf = torch_module.zeros(
+        (num_classes, num_classes), dtype=torch_module.long, device=device
+    )
+    conf_ig = (
+        torch_module.zeros(
+            (int(num_classes_ig), int(num_classes_ig)),
+            dtype=torch_module.long, device=device,
+        )
+        if want_ig
+        else None
+    )
 
     grad_context = torch_module.enable_grad if training else torch_module.no_grad
     try:
@@ -655,21 +735,15 @@ def run_segmentation_epoch(
                             # names ModelEMA.update wouldn't otherwise match.
                             ema.update(ema_source_model if ema_source_model is not None else model)
 
-                metrics = _compute_segmentation_metrics(
-                    torch_module,
-                    logits,
-                    target,
-                    num_classes=num_classes,
-                    ignore_index=ignore_index,
+                _accumulate_confusion(
+                    torch_module, conf, logits, target,
+                    num_classes=num_classes, ignore_index=ignore_index,
                 )
-                metrics_ig = (
-                    _compute_segmentation_metrics(
-                        torch_module, ig_logits, ig_target,
-                        num_classes=num_classes_ig, ignore_index=ignore_index,
+                if want_ig:
+                    _accumulate_confusion(
+                        torch_module, conf_ig, ig_logits, ig_target,
+                        num_classes=int(num_classes_ig), ignore_index=ignore_index,
                     )
-                    if want_ig
-                    else None
-                )
                 loss_value = loss.item()
                 if error_on_nonfinite_loss and not np.isfinite(loss_value):
                     # Once the weights themselves go non-finite nothing recovers:
@@ -686,32 +760,31 @@ def run_segmentation_epoch(
                     )
                 total_samples += batch_size
                 total_loss += loss_value * batch_size
-                total_pixel_acc += metrics["pixel_acc"] * batch_size
-                total_miou += metrics["miou"] * batch_size
-                if want_ig:
-                    total_pixel_acc_ig += metrics_ig["pixel_acc"] * batch_size
-                    total_miou_ig += metrics_ig["miou"] * batch_size
 
                 if progress is not None:
+                    # Running loss only: mIoU is now a global quantity and is
+                    # not defined mid-epoch without forcing a device sync.
                     progress.set_postfix(
                         loss=f"{total_loss / max(total_samples, 1):.4f}",
-                        miou=f"{total_miou / max(total_samples, 1):.4f}",
                     )
                     progress.update(1)
     finally:
         if progress is not None:
             progress.close()
 
+    # One sync per epoch, here.
+    global_metrics = _metrics_from_confusion(torch_module, conf)
     result = {
         "loss": total_loss / max(total_samples, 1),
-        "pixel_acc": total_pixel_acc / max(total_samples, 1),
-        "miou": total_miou / max(total_samples, 1),
+        "pixel_acc": global_metrics["pixel_acc"],
+        "miou": global_metrics["miou"],
     }
     if want_ig:
         # Extra keys only appear when F1 is active -- callers that don't use
         # it keep getting exactly today's 3-key dict.
-        result["pixel_acc_ig"] = total_pixel_acc_ig / max(total_samples, 1)
-        result["miou_ig"] = total_miou_ig / max(total_samples, 1)
+        ig_metrics = _metrics_from_confusion(torch_module, conf_ig)
+        result["pixel_acc_ig"] = ig_metrics["pixel_acc"]
+        result["miou_ig"] = ig_metrics["miou"]
     return result
 
 

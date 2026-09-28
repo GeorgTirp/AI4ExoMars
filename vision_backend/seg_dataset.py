@@ -392,14 +392,27 @@ class SegmentationCropDataset(Dataset):
             self._cache_labels = np.load(self.cache_dir / "labels.npy", mmap_mode="r")
         return self._cache_images, self._cache_labels
 
+    @staticmethod
+    def _sample_flips() -> tuple[bool, bool]:
+        """Draw one (horizontal, vertical) flip decision for a whole sample."""
+        return bool(torch.rand(()) < 0.5), bool(torch.rand(()) < 0.5)
+
+    @staticmethod
+    def _apply_flips(arr: np.ndarray, flip_h: bool, flip_v: bool) -> np.ndarray:
+        if flip_h:
+            arr = arr[:, ::-1]
+        if flip_v:
+            arr = arr[::-1, :]
+        return arr
+
     def _flip_augment(self, img: np.ndarray, lab: np.ndarray):
-        if torch.rand(()) < 0.5:  # horizontal flip
-            img = img[:, ::-1]
-            lab = lab[:, ::-1]
-        if torch.rand(()) < 0.5:  # vertical flip
-            img = img[::-1, :]
-            lab = lab[::-1, :]
-        return img, lab
+        """Sample and apply one flip pair jointly to image and label.
+
+        `__getitem__` draws the decision itself so the context crop can receive
+        the SAME transform; this wrapper remains for direct callers and tests.
+        """
+        flip_h, flip_v = self._sample_flips()
+        return self._apply_flips(img, flip_h, flip_v), self._apply_flips(lab, flip_h, flip_v)
 
     def _photometric_augment(self, x: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
         if self.brightness_jitter <= 0 and self.contrast_jitter <= 0:
@@ -464,8 +477,13 @@ class SegmentationCropDataset(Dataset):
         target[lab == 0] = self.ignore_index
         target[arr == 0] = self.ignore_index
 
+        flips = None
         if self.augment:
-            x, target = self._flip_augment(x, target)
+            # Drawn here, not inside _flip_augment, so the context crop below
+            # can receive the identical transform.
+            flips = self._sample_flips()
+            x = self._apply_flips(x, *flips)
+            target = self._apply_flips(target, *flips)
             x = self._photometric_augment(x, valid_mask=(x != -1.0))
 
         image = torch.from_numpy(np.ascontiguousarray(x)).unsqueeze(0)  # (1, S, S)
@@ -474,6 +492,16 @@ class SegmentationCropDataset(Dataset):
 
         if self.use_context:
             ctx = self._read_context(rec)
+            if flips is not None:
+                # The context must take the SAME geometric transform as the
+                # local crop. Without this the branches describe differently
+                # oriented scenes, which weakens their correspondence and
+                # confounds the context on/off comparison. The effect is small
+                # for the current encoder -- LightweightContextEncoder ends in
+                # AdaptiveAvgPool2d(1), and a global average is nearly
+                # flip-invariant -- but it becomes first-order for any spatially
+                # resolved context fusion.
+                ctx = self._apply_flips(ctx, *flips)
             # Normalized exactly like the local crop, so both branches see the
             # same input distribution.
             ctx = ctx.astype(np.float32) / 127.5 - 1.0

@@ -3,6 +3,15 @@ initialdir = /home/gtirpitz/AI4ExoMars
 
 executable = run_variant_sweep.sh
 
+# $(VARIANT) is expanded by condor_submit, which does NOT read the shell
+# environment -- `getenv = True` only reaches the running job, long after these
+# paths are built. So the documented `VARIANT=v0 condor_submit ...` form left
+# this as the empty string, produced job_outputs/variant_/, and every job was
+# held with "Failed to open ... as standard output" before the script ran.
+# $ENV() reads the submitting environment; a command-line `VARIANT=v0` macro
+# still overrides it, so both invocation styles now work.
+VARIANT = $ENV(VARIANT:NOTSET)
+
 output = job_outputs/variant_$(VARIANT)/agent.$(Cluster).$(Process).out
 error  = job_outputs/variant_$(VARIANT)/agent.$(Cluster).$(Process).err
 log    = job_outputs/variant_$(VARIANT)/agent.$(Cluster).log
@@ -10,11 +19,15 @@ log    = job_outputs/variant_$(VARIANT)/agent.$(Cluster).log
 request_cpus   = 8
 request_memory = 32768
 request_gpus   = 1
-min_gpu_mem_mb = 24000
+# 40 GB, not 24: the decoder runs at full 512x512 resolution so activations
+# dominate. BATCH_SIZE=16 OOM'd a 40 GB A100 outright (38.4 GiB allocated), and
+# the launcher's BATCH_SIZE=8 would not fit a 24 GB card either. Raise this in
+# step with BATCH_SIZE, never independently.
+min_gpu_mem_mb = 40000
 requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
 
-# VARIANT, SWEEP_ID and WANDB_API_KEY come from the submitting shell via getenv.
-# One agent with SWEEP_COUNT=4 covers the config's run_cap: 4.
+# VARIANT, SWEEP_ID and WANDB_API_KEY come from the submitting shell via getenv
+# (or ~/.netrc for wandb -- see run_variant_sweep.sh).
 getenv = True
 # One trial per job, four jobs -- NOT one job running four trials. A held or
 # evicted agent then costs one trial instead of all four: the 2026-08-27 launch

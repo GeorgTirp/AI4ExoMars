@@ -21,7 +21,7 @@ set -euo pipefail
 #
 # Throughput (after the 2026-08-27 launch spent 36 h/agent and produced nothing):
 #   * the padded crop cache is now REQUIRED -- see the CROP_CACHE_DIR check below
-#   * BATCH_SIZE defaults to 16, not the script default of 4. At 4, the full
+#   * BATCH_SIZE defaults to 8, not the script default of 4. At 4, the full
 #     manifest is 13,492 optimizer steps per epoch on an A100-80GB that is
 #     nowhere near full. Raising it changes the LR that the sweep should find,
 #     so the swept range is only comparable across runs at the SAME batch size.
@@ -104,6 +104,15 @@ if [ -f "$CROP_CACHE_DIR/meta.json" ]; then
   CROP_CACHE_ARGS=(--crop-cache-dir "$CROP_CACHE_DIR")
 fi
 
+# torch.compile. Measured 0.45 s/step uncompiled at batch 8, i.e. ~50 min/epoch
+# and ~42 h for 50 epochs -- past MaxTime. The repo measured 2.1x from compile,
+# which brings a full trial comfortably inside the wall. COMPILE=0 disables it
+# if a backend problem shows up; the run is correct either way, just slower.
+COMPILE_ARGS=()
+if [ "${COMPILE:-1}" = "1" ]; then
+  COMPILE_ARGS=(--compile)
+fi
+
 # Context variants are useless without the cache: the loader would silently fall
 # back to a live per-item 2048px read and the run would crawl. Fail loudly.
 CONTEXT_ARGS=()
@@ -162,9 +171,10 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --loader-factory vision_backend.seg_dataset:create_segmentation_dataloaders \
   --loader-config-path "$LOADER_CONFIG" \
   ${CROP_CACHE_ARGS[@]+"${CROP_CACHE_ARGS[@]}"} \
+  ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   ${CONTEXT_ARGS[@]+"${CONTEXT_ARGS[@]}"} \
   --num-workers "${NUM_WORKERS:-8}" \
-  --batch-size "${BATCH_SIZE:-16}" \
+  --batch-size "${BATCH_SIZE:-8}" \
   --epochs "${EPOCHS:-50}" \
   --ig-loss-weight "${IG_LOSS_WEIGHT:-0.4}" \
   --decoder-dropout 0.1 \

@@ -164,7 +164,20 @@ def create_optimizer(
     - If Muon is requested but not installed, AdamW is used and a warning printed.
     """
     named_params = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
-    param_groups = _group_params_by_llrd_rank(named_params, lr, llrd)
+    # Weight decay must NOT reach norms, biases or the layer-scale gamma.
+    # Until this split was added, `create_optimizer` grouped purely by LLRD rank
+    # and handed one uniform weight_decay to every parameter. Measured effect on
+    # a single-batch overfit (scripts/diag_overfit_one_batch.py): loss stalled at
+    # 1.14 with wd=1e-2 versus 0.09 with wd=0, and on the full Stage-3 run the
+    # model collapsed to the class prior entirely. The routed Muon+NAdam builder
+    # below always did this correctly; the single-optimizer path did not.
+    decay_named, no_decay_named = split_decay_named(named_params)
+    param_groups = (
+        _group_params_by_llrd_rank(decay_named, lr, llrd,
+                                   extra={"weight_decay": weight_decay})
+        + _group_params_by_llrd_rank(no_decay_named, lr, llrd,
+                                     extra={"weight_decay": 0.0})
+    )
 
     # --------------------
     # 1) Try Muon
@@ -177,8 +190,24 @@ def create_optimizer(
     # 2) Try NAdam (NadamW-style)
     # --------------------
     if hasattr(torch.optim, "NAdam"):
-        print("[optimizers] Using NAdam (NadamW-style) optimizer.")
-        return torch.optim.NAdam(param_groups, lr=lr, weight_decay=weight_decay)
+        # torch.optim.NAdam defaults decoupled_weight_decay=False, i.e. plain L2
+        # ADDED TO THE GRADIENT -- not the NAdamW behaviour this module's
+        # docstring and the sweep's weight_decay range (1e-4 .. 1e-1) assume.
+        # Coupled L2 goes through the Adam denominator, so it keeps a constant
+        # pull on every parameter regardless of its gradient scale.
+        try:
+            optimizer = torch.optim.NAdam(
+                param_groups, lr=lr, weight_decay=weight_decay,
+                decoupled_weight_decay=True,
+            )
+            print("[optimizers] Using NAdam with decoupled weight decay (NAdamW).")
+        except TypeError:
+            optimizer = torch.optim.NAdam(param_groups, lr=lr, weight_decay=weight_decay)
+            print(
+                "[optimizers] WARNING: this torch has no NAdam(decoupled_weight_decay=); "
+                "weight decay is coupled L2. Prefer a small weight_decay here."
+            )
+        return optimizer
 
     # --------------------
     # 3) Fallback: AdamW
@@ -275,27 +304,38 @@ def create_cosine_scheduler_with_warmup(
 # ---------------------------------------------------------------------------
 # Stage-1 SimMIM: weight-decay param groups + optimizer + floored scheduler
 # ---------------------------------------------------------------------------
+def split_decay_named(
+    named_params: list[tuple[str, torch.nn.Parameter]],
+) -> tuple[list[tuple[str, torch.nn.Parameter]], list[tuple[str, torch.nn.Parameter]]]:
+    """Partition (name, param) pairs into (decay, no_decay).
+
+    Excludes norms/biases (1-D), relative-position-bias tables, GRN affine
+    params, and the mask fill scalar from weight decay (§5). Decaying those is
+    not a mild regularization: LayerNorm2d.weight starts at 1.0 and the
+    ConvNeXt layer-scale `gamma` at 1e-6, so pulling them toward zero
+    attenuates every residual branch in the network.
+    """
+    decay: list[tuple[str, torch.nn.Parameter]] = []
+    no_decay: list[tuple[str, torch.nn.Parameter]] = []
+    for name, param in named_params:
+        if not param.requires_grad:
+            continue
+        if param.ndim <= 1 or any(frag in name for frag in _NO_DECAY_NAME_FRAGMENTS):
+            no_decay.append((name, param))
+        else:
+            decay.append((name, param))
+    return decay, no_decay
+
+
 def split_decay_param_groups(
     model: torch.nn.Module,
     weight_decay: float,
 ) -> list[dict]:
-    """Two param groups: weight decay on >=2-D weights, none on the rest.
-
-    Excludes norms/biases (1-D), relative-position-bias tables, GRN affine
-    params, and the mask fill scalar from weight decay (§5).
-    """
-    decay: list[torch.nn.Parameter] = []
-    no_decay: list[torch.nn.Parameter] = []
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if param.ndim <= 1 or any(frag in name for frag in _NO_DECAY_NAME_FRAGMENTS):
-            no_decay.append(param)
-        else:
-            decay.append(param)
+    """Two param groups: weight decay on >=2-D weights, none on the rest."""
+    decay, no_decay = split_decay_named(list(model.named_parameters()))
     return [
-        {"params": decay, "weight_decay": weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
+        {"params": [p for _, p in decay], "weight_decay": weight_decay},
+        {"params": [p for _, p in no_decay], "weight_decay": 0.0},
     ]
 
 

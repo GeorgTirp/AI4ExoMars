@@ -38,12 +38,24 @@ run_cap: 4
 parameters:
   # The single-optimizer path (--use-muon off) is used for these runs, so these
   # two keys are the live ones; muon_lr/nadam_lr would be dead here.
+  # Upper bound cut from 3e-3 to 1e-3 on 2026-09-28. A rehearsal trial sampled
+  # 1.98e-3 and hit non-finite loss 580 steps after the warmup peak, even with
+  # --grad-clip-norm 1.0. The old range was set while weight decay was silently
+  # crushing the model, so nothing ever reached a regime where a hot LR could
+  # diverge. Identical across v0-v3.
   optimization.learning_rate:
     distribution: log_uniform_values
     min: 1.0e-4
-    max: 3.0e-3
+    max: 1.0e-3
 
+  # Narrowed from 1e-4 .. 1e-1 on 2026-09-28. Weight decay is what destroyed
+  # the 2026-08-27 runs: create_optimizer applied it to LayerNorm/bias/layer-
+  # scale params AND used coupled L2 (NAdam without decoupled_weight_decay), so
+  # the model collapsed to the class prior. Both are fixed, but with run_cap: 4
+  # a single trial sampled near 1e-1 still burns 25% of a variant's budget on a
+  # value we now have evidence is harmful. Identical across v0-v3, so the
+  # between-variant comparison is unaffected.
   optimization.weight_decay:
     distribution: log_uniform_values
-    min: 1.0e-4
-    max: 1.0e-1
+    min: 1.0e-5
+    max: 1.0e-2
