@@ -17,14 +17,29 @@ error  = job_outputs/variant_$(VARIANT)/agent.$(Cluster).$(Process).err
 log    = job_outputs/variant_$(VARIANT)/agent.$(Cluster).log
 
 request_cpus   = 8
-request_memory = 32768
+# Measured RSS of a running trial is ~3.6 GB; 32 GB was pure over-request
+# and needlessly narrowed the set of slots that could match.
+request_memory = 12288
 request_gpus   = 1
-# 40 GB, not 24: the decoder runs at full 512x512 resolution so activations
-# dominate. BATCH_SIZE=16 OOM'd a 40 GB A100 outright (38.4 GiB allocated), and
-# the launcher's BATCH_SIZE=8 would not fit a 24 GB card either. Raise this in
-# step with BATCH_SIZE, never independently.
+# Pinned to ONE GPU model, and to the cheapest tier that fits. Three reasons:
+#
+# Price: nodes advertise MinRunningPrice and reject jobs whose bid is below it.
+# A100-40GB asks 15, A100-80GB asks 25, H100 35, B200 55. A 16-job sweep sat
+# idle for hours at bid 20 because every 80 GB node refused it by 5 units.
+#
+# Memory: the decoder runs at full 512x512 resolution, so activations dominate
+# and peak memory scales hard with batch size. BATCH_SIZE=16 OOM'd a 40 GB card
+# outright; a measured v0 trial at BATCH_SIZE=8 peaked at 37.7 GB. At
+# BATCH_SIZE=4 that lands near ~19 GB, which fits 40 GB with room for the
+# context variants' second encoder branch.
+#
+# Comparability: the comparison reports train_step_ms, so v0-v3 must run on
+# identical hardware. The cluster mixes A100-40/80GB, H100, B200 and RTX 6000;
+# unpinned, part of any step-time difference between variants would just be
+# which node each job landed on. Change BATCH_SIZE and this pin together.
 min_gpu_mem_mb = 40000
-requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB")
 
 # VARIANT, SWEEP_ID and WANDB_API_KEY come from the submitting shell via getenv
 # (or ~/.netrc for wandb -- see run_variant_sweep.sh).

@@ -174,7 +174,7 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   ${COMPILE_ARGS[@]+"${COMPILE_ARGS[@]}"} \
   ${CONTEXT_ARGS[@]+"${CONTEXT_ARGS[@]}"} \
   --num-workers "${NUM_WORKERS:-8}" \
-  --batch-size "${BATCH_SIZE:-8}" \
+  --batch-size "${BATCH_SIZE:-4}" \
   --epochs "${EPOCHS:-50}" \
   --ig-loss-weight "${IG_LOSS_WEIGHT:-0.4}" \
   --decoder-dropout 0.1 \
