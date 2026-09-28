@@ -66,4 +66,10 @@ periodic_hold_reason = "Job runtime exceeded MaxTime"
 on_exit_hold = (ExitCode != 0)
 on_exit_hold_reason = "Variant agent exited non-zero -- check the .err log"
 
+# Deliberately NO periodic_release. Retrying a held trial looks attractive but
+# is wrong here on two counts: the sweep's `run_cap` counts failed runs, so a
+# retry spends the variant's trial budget rather than restoring it; and Condor
+# truncates the .err on each restart, so the retry destroys the log of the
+# failure you would need to diagnose. Release by hand after reading the log.
+
 queue 4

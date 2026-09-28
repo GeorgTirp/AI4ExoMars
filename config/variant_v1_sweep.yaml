@@ -29,7 +29,13 @@ metric:
   name: val/miou
   goal: maximize
 
-run_cap: 4
+# Ceiling on ATTEMPTS, not on successful trials -- only 4 jobs are queued, so
+# 4 successes is still the target. The headroom exists because a failed run
+# counts against the cap: v3 lost two of its four to "CUDA-capable device(s)
+# is/are busy or unavailable" (a node whose GPU another job already held) and
+# could then not replace them. With 8, a released job can still reach 4 good
+# trials. Same value for v0-v3, so no variant gets more search than another.
+run_cap: 8
 
 # No early_terminate: with only 4 runs per variant there is nothing to compare a
 # straggler against, and killing one would leave the variant with fewer samples
