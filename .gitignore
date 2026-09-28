@@ -31,5 +31,32 @@ checkpoints/
 outputs/
 wandb/
 
+# Cluster job logs. Condor .out/.err/.log plus the per-run wandb directories
+# the agents write underneath them -- regenerable, and the .out files carry
+# full tqdm output so they get large fast.
+job_outputs/
+
+# Precomputed caches. These live under data/ (already ignored) but the pattern
+# is here too so a cache built anywhere else can never be committed:
+# seg_crop_cache_full is ~37 GB and seg_context_cache_full ~14.6 GB.
+*.npy
+*.npz
+
+# Model weights and archives. *.pt is covered above; these are the other forms
+# checkpoints get saved or shipped in -- results/tune_stage1_50ep/
+# 50ep_best_model.zip alone is 216 MB and `git add .` would have taken it.
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.zip
+*.tar
+*.tar.gz
+*.h5
+
+# Local scratch
+tmp/
+.pytest_basetemp/
+
 # Local notebooks / logs
 *.log

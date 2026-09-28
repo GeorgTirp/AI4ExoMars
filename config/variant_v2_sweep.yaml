@@ -13,7 +13,7 @@
 # be silently ignored, exactly as noted in stage3_segmentation_finetune_sweep.yaml):
 #   --model-kind context  --no-use-context  --random-init-encoder
 #   --local-base-channels 44  --context-base-channels 22
-#   --context-dim 217  --decoder-channels 192
+#   --context-dim 217  --decoder-channels 176
 #
 # Initialise:
 #   wandb sweep --project ai4exomars config/variant_v2_sweep.yaml

@@ -1,0 +1,28 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = bench_variant_steptime.sh
+
+output = job_outputs/bench_steptime/bench.$(Cluster).$(Process).out
+error  = job_outputs/bench_steptime/bench.$(Cluster).$(Process).err
+log    = job_outputs/bench_steptime/bench.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+min_gpu_mem_mb = 24000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-steptime-bench"
+
+# A couple of minutes of work; 30 min ceiling.
+MaxTime = 1800
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Benchmark exceeded MaxTime"
+
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Benchmark exited non-zero -- check the .err log"
+
+queue 1

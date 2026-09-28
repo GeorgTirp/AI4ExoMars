@@ -16,10 +16,19 @@ requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
 # VARIANT, SWEEP_ID and WANDB_API_KEY come from the submitting shell via getenv.
 # One agent with SWEEP_COUNT=4 covers the config's run_cap: 4.
 getenv = True
-environment = "SWEEP_COUNT=4"
+# One trial per job, four jobs -- NOT one job running four trials. A held or
+# evicted agent then costs one trial instead of all four: the 2026-08-27 launch
+# ran SWEEP_COUNT=4 in a single job, hit MaxTime during trial 1, and wrote no
+# variant row at all because a row is only appended when a trial finishes.
+# `run_cap: 4` in the sweep YAML still bounds the total.
+environment = "SWEEP_COUNT=1"
 
 +JobBatchName = "ai4exomars-model-variants"
 
+# 36 h. Sized for ONE trial: measured 45 min/epoch x 50 epochs = 37 h on the
+# live-read path, i.e. a trial did not fit. With the crop cache and batch 16 it
+# should be a large multiple of what a trial needs -- re-measure from the first
+# job's epoch timings before trusting the margin.
 MaxTime = 129600
 periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
 periodic_hold_reason = "Job runtime exceeded MaxTime"
@@ -29,4 +38,4 @@ periodic_hold_reason = "Job runtime exceeded MaxTime"
 on_exit_hold = (ExitCode != 0)
 on_exit_hold_reason = "Variant agent exited non-zero -- check the .err log"
 
-queue 1
+queue 4

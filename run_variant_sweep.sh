@@ -18,6 +18,15 @@ set -euo pipefail
 #   export WANDB_API_KEY=...
 #   VARIANT=v0 SWEEP_ID=entity/ai4exomars/<id> ./run_variant_sweep.sh
 #   VARIANT=v0 SWEEP_ID=... condor_submit run_variant_sweep.sub
+#
+# Throughput (after the 2026-08-27 launch spent 36 h/agent and produced nothing):
+#   * the padded crop cache is now REQUIRED -- see the CROP_CACHE_DIR check below
+#   * BATCH_SIZE defaults to 16, not the script default of 4. At 4, the full
+#     manifest is 13,492 optimizer steps per epoch on an A100-80GB that is
+#     nowhere near full. Raising it changes the LR that the sweep should find,
+#     so the swept range is only comparable across runs at the SAME batch size.
+#   * --compile (measured 2.1x) and --channels-last (1.17x) are further levers,
+#     left off here because neither has been exercised on this model yet.
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,12 +35,25 @@ cd "$AI4EXOMARS_ROOT"
 
 : "${VARIANT:?VARIANT is not set -- one of v0 v1 v2 v3}"
 : "${SWEEP_ID:?SWEEP_ID is not set -- create it with 'wandb sweep --project ai4exomars config/variant_${VARIANT}_sweep.yaml'}"
-: "${WANDB_API_KEY:?WANDB_API_KEY is not set -- export it before condor_submit (the .sub uses getenv = True)}"
+# Credentials come from WANDB_API_KEY (inherited via `getenv = True`) or from
+# ~/.netrc, which the execute nodes see through the shared home. The netrc is
+# preferable: `getenv = True` copies the submitting environment into the job
+# ClassAd, so an exported key is readable by anyone who can run `condor_q -l`.
+if [ -z "${WANDB_API_KEY:-}" ] && ! grep -qs 'api\.wandb\.ai' "${HOME}/.netrc"; then
+  echo "ERROR: no wandb credentials found." >&2
+  echo "  Either: wandb login          (writes ~/.netrc, nothing lands in the job ad)" >&2
+  echo "  Or:     export WANDB_API_KEY=...   before condor_submit_bid" >&2
+  exit 1
+fi
 
 # --- per-variant architecture ----------------------------------------------
-# Widths calibrated locally so small/big = 0.696x params and ~0.66-0.70x train
-# step time; decoder_channels is scaled too because the fixed-width decoder is
-# ~73% of the step and width alone moved wall-clock by only 3%.
+# Widths calibrated ON AN A100 (SERVER_LAUNCH.md step 2b) so small/big lands in
+# the 0.68-0.72 band on BOTH ratios: 0.684x params, 0.718x train step time.
+# decoder_channels is scaled too because the fixed-width decoder is ~73% of the
+# step and width alone moved wall-clock by only 3%. dch=192 was the pre-launch
+# guess and measured 0.758-0.762x step on two A100s -- out of band -- so the
+# grid over (local_base_channels x decoder_channels) picked 176, the only point
+# with both ratios inside 0.68-0.72.
 case "$VARIANT" in
   v0) SIZE=big;   CONTEXT_FLAG="--no-use-context" ;;
   v1) SIZE=big;   CONTEXT_FLAG="--use-context" ;;
@@ -43,12 +65,13 @@ esac
 if [ "$SIZE" = "big" ]; then
   LOCAL_BASE=52; CONTEXT_BASE=26; CONTEXT_DIM=256; DECODER_CH=256
 else
-  LOCAL_BASE=44; CONTEXT_BASE=22; CONTEXT_DIM=217; DECODER_CH=192
+  LOCAL_BASE=44; CONTEXT_BASE=22; CONTEXT_DIM=217; DECODER_CH=176
 fi
 
 DER="${DER:-data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived}"
 LOADER_CONFIG="${LOADER_CONFIG:-$DER/seg_loader_DC_full.json}"
 CONTEXT_CACHE_DIR="${CONTEXT_CACHE_DIR:-$DER/seg_context_cache_full}"
+CROP_CACHE_DIR="${CROP_CACHE_DIR:-$DER/seg_crop_cache_full}"
 OUT_TAG="variant_${VARIANT}"
 
 mkdir -p "checkpoints/${OUT_TAG}" "job_outputs/${OUT_TAG}"
@@ -56,6 +79,30 @@ mkdir -p "checkpoints/${OUT_TAG}" "job_outputs/${OUT_TAG}"
 for f in "$DER/drg_on_label_grid.tif" "$DER/labels_DC_classid.tif" "$LOADER_CONFIG"; do
   [ -f "$f" ] || { echo "ERROR: required input not found: $PWD/$f" >&2; exit 1; }
 done
+
+# EVERY variant needs the padded crop cache. Without it the loader re-reads each
+# crop from the DEFLATE-tiled GeoTIFFs, and --spatial-jitter-px puts the window
+# off the tile grid so up to 4 tiles are decompressed per crop per epoch. That is
+# what the first launch did: v0 spent 36 h to reach epoch 48 of trial 1 of 4 and
+# was held by MaxTime having written no result at all. Fail loudly, like the
+# context cache below. CROP_CACHE_OPTIONAL=1 opts out for a smoke run.
+if [ ! -f "$CROP_CACHE_DIR/meta.json" ] && [ -z "${CROP_CACHE_OPTIONAL:-}" ]; then
+  echo "ERROR: padded crop cache not found at:" >&2
+  echo "  $PWD/$CROP_CACHE_DIR" >&2
+  echo "Build it first (one pass over the mosaic, ~37 GB, I/O bound):" >&2
+  echo "  python -m vision_backend.prep_seg_crop_cache \\" >&2
+  echo "    --manifest $DER/seg_crops_DC_full.csv \\" >&2
+  echo "    --imagery  $DER/drg_on_label_grid.tif \\" >&2
+  echo "    --labels   $DER/labels_DC_classid.tif \\" >&2
+  echo "    --jitter-margin 32 \\" >&2
+  echo "    --out-dir  $CROP_CACHE_DIR" >&2
+  echo "Or set CROP_CACHE_OPTIONAL=1 to run live-read anyway (much slower)." >&2
+  exit 1
+fi
+CROP_CACHE_ARGS=()
+if [ -f "$CROP_CACHE_DIR/meta.json" ]; then
+  CROP_CACHE_ARGS=(--crop-cache-dir "$CROP_CACHE_DIR")
+fi
 
 # Context variants are useless without the cache: the loader would silently fall
 # back to a live per-item 2048px read and the run would crawl. Fail loudly.
@@ -114,13 +161,16 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --decoder-channels "$DECODER_CH" \
   --loader-factory vision_backend.seg_dataset:create_segmentation_dataloaders \
   --loader-config-path "$LOADER_CONFIG" \
+  ${CROP_CACHE_ARGS[@]+"${CROP_CACHE_ARGS[@]}"} \
   ${CONTEXT_ARGS[@]+"${CONTEXT_ARGS[@]}"} \
   --num-workers "${NUM_WORKERS:-8}" \
+  --batch-size "${BATCH_SIZE:-16}" \
   --epochs "${EPOCHS:-50}" \
   --ig-loss-weight "${IG_LOSS_WEIGHT:-0.4}" \
   --decoder-dropout 0.1 \
   --ema-decay 0.9999 \
   --llrd 1.0 \
+  --per-run-checkpoint \
   --variant-id "$VARIANT" \
   --variant-metrics-path "results/variant_comparison/${OUT_TAG}.jsonl" \
   --checkpoint-path "checkpoints/${OUT_TAG}/best.pt" \

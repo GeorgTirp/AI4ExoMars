@@ -1,0 +1,25 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = stage1_training_50ep.sh
+
+output = job_outputs/stage1_training_50ep/stage1_50ep.$(Cluster).$(Process).out
+error  = job_outputs/stage1_training_50ep/stage1_50ep.$(Cluster).$(Process).err
+log    = job_outputs/stage1_training_50ep/stage1_50ep.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 36000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-stage1-50ep"
+
+# 50 ep × ~30 min/ep upper bound = 25 h; +1 h headroom.
+MaxTime = 93600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+queue 1

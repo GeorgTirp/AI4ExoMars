@@ -1,0 +1,25 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = stage1_simmim_25ep.sh
+
+output = job_outputs/stage1_simmim_25ep/run.$(Cluster).$(Process).out
+error  = job_outputs/stage1_simmim_25ep/run.$(Cluster).$(Process).err
+log    = job_outputs/stage1_simmim_25ep/run.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 36000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-stage1-simmim-25ep"
+
+# 2750 steps × ~3 s/step ≈ 2.3 h; +2 h headroom.
+MaxTime = 15600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+queue 1

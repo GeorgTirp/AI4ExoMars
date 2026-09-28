@@ -220,6 +220,15 @@ def parse_args() -> argparse.Namespace:
              "loader falls back to a live per-item read (dev smoke only).",
     )
     parser.add_argument(
+        "--crop-cache-dir", default=None,
+        help="Padded (imagery, label) crop cache from prep_seg_crop_cache.py, "
+             "index-aligned with the seg manifest. Without it the loader reads "
+             "every crop live from the DEFLATE-tiled GeoTIFFs, and spatial "
+             "jitter puts each window off the tile grid, so up to 4 tiles are "
+             "decompressed per crop per epoch. Overrides `cache_dir` in "
+             "--loader-config-path.",
+    )
+    parser.add_argument(
         "--variant-id", default=None,
         help="Label for the model-variant comparison (v0..v3); recorded in the "
              "metrics row and logged to wandb.",
@@ -349,6 +358,7 @@ def build_config(args: argparse.Namespace) -> dict:
             # loader on its existing (context-free) path.
             "use_context": bool(args.use_context),
             "context_cache_dir": args.context_cache_dir,
+            "crop_cache_dir": args.crop_cache_dir,
             "loss_kind": args.loss_kind,
             "focal_gamma": args.focal_gamma,
             "logit_adjust_tau": args.logit_adjust_tau,
@@ -544,6 +554,21 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             "contrast_jitter": float(data_config.get("contrast_jitter", 0.15)),
         }
     )
+    # The padded crop cache is the difference between slicing a memmap and
+    # re-decompressing GeoTIFF tiles for every crop of every epoch, so say
+    # loudly which path this run is on rather than leaving it to be inferred
+    # from the epoch time.
+    if data_config.get("crop_cache_dir"):
+        loader_kwargs["cache_dir"] = data_config["crop_cache_dir"]
+    if loader_kwargs.get("cache_dir"):
+        print(f"[stage3] crop cache: {loader_kwargs['cache_dir']}")
+    else:
+        print(
+            "[stage3] WARNING: no crop cache (--crop-cache-dir / loader-config "
+            "`cache_dir`) -- every crop is read live from the source GeoTIFFs "
+            "and spatial jitter forces an up-to-4-tile DEFLATE decompression "
+            "per crop per epoch. Build one with prep_seg_crop_cache.py."
+        )
     # Only pass the context knobs when the run actually wants context, so a
     # loader factory without those parameters is unaffected.
     if data_config.get("use_context"):
@@ -946,7 +971,11 @@ def train_stage(config: dict, wandb_run=None) -> dict:
         )
 
     variant_row = {
-        "variant_id": data_config.get("variant_id"),
+        # build_config puts these in `initialization`, not `data` -- reading
+        # them from data_config silently disabled the whole variant comparison:
+        # every row was written with variant_id=None, and the metrics file was
+        # never written at all because the guard below always saw None.
+        "variant_id": initialization.get("variant_id"),
         "run_name": getattr(wandb_run, "name", None),
         "run_id": getattr(wandb_run, "id", None),
         "model_kind": model_kind,
@@ -975,9 +1004,9 @@ def train_stage(config: dict, wandb_run=None) -> dict:
 
     log_metrics(wandb_run, {f"variant/{k}": v for k, v in variant_row.items()
                             if isinstance(v, (int, float))})
-    if data_config.get("variant_metrics_path"):
-        write_variant_row(data_config["variant_metrics_path"], variant_row)
-        print(f"[stage3] variant row -> {data_config['variant_metrics_path']}")
+    if initialization.get("variant_metrics_path"):
+        write_variant_row(initialization["variant_metrics_path"], variant_row)
+        print(f"[stage3] variant row -> {initialization['variant_metrics_path']}")
 
     save_history(history_rows, history_path)
     final_metrics = {

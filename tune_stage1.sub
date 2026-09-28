@@ -1,0 +1,32 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = tune_stage1.sh
+
+# Set SWEEP_ID at submit time:
+#   condor_submit tune_stage1.sub SWEEP_ID=gtirpitz/ai4exomars/<id>
+SWEEP_ID = geotir-university-of-t-bingen/ai4exomars_stage_I_50ep/cp3328e7
+arguments = $(SWEEP_ID) 4
+
+output = job_outputs/tune_stage1/agent.$(Cluster).$(Process).out
+error  = job_outputs/tune_stage1/agent.$(Cluster).$(Process).err
+log    = job_outputs/tune_stage1/agent.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 36000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-tune-stage1"
+
+# 6 h per agent run (10 ep × ~30 min/ep upper bound).
+MaxTime = 21600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+# Submit N jobs to run N parallel agents (one trial each).
+# Increase to saturate available GPU slots; sweep controller caps total trials.
+queue 4

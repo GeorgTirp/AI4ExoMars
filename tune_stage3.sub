@@ -1,0 +1,32 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = tune_stage3.sh
+
+# Set SWEEP_ID at submit time. The entity is the wandb TEAM, not the username:
+#   condor_submit tune_stage3.sub SWEEP_ID=geotir-university-of-t-bingen/ai4exomars/<id>
+# Left as a placeholder deliberately -- submitting it unedited must fail fast in
+# the script rather than burn a GPU slot on an agent that cannot resolve a sweep.
+SWEEP_ID = REPLACE_WITH_SWEEP_ID
+arguments = $(SWEEP_ID)
+
+output = job_outputs/tune_stage3/agent.$(Cluster).$(Process).out
+error  = job_outputs/tune_stage3/agent.$(Cluster).$(Process).err
+log    = job_outputs/tune_stage3/agent.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 16384
+request_gpus   = 1
+min_gpu_mem_mb = 16000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-tune-stage3"
+
+# 10 h per agent run (25 ep fine-tuning).
+MaxTime = 36000
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+queue 4

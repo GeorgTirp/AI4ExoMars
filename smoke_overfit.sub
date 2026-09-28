@@ -1,0 +1,29 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = smoke_overfit.sh
+
+output = job_outputs/smoke/smoke.$(Cluster).$(Process).out
+error  = job_outputs/smoke/smoke.$(Cluster).$(Process).err
+log    = job_outputs/smoke/smoke.$(Cluster).log
+
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+min_gpu_mem_mb = 24000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-smoke-overfit"
+
+# A few hundred steps on a few hundred crops: minutes, not hours. The ceiling is
+# here only so a hang cannot quietly bill a GPU slot all day.
+MaxTime = 3600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Smoke run exceeded MaxTime -- it should take minutes"
+
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Smoke run exited non-zero -- check the .err log"
+
+queue 1

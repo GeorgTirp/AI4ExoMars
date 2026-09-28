@@ -1,0 +1,33 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = tune_stage1_simmim.sh
+
+# Set SWEEP_ID at submit time. The entity is the wandb TEAM, not the username:
+#   condor_submit tune_stage1_simmim.sub SWEEP_ID=geotir-university-of-t-bingen/ai4exomars/<id>
+# NOT `SWEEP_ID = $(SWEEP_ID)`: that is a self-referential macro, so an omitted
+# SWEEP_ID expanded to nothing and the agent was launched with an empty sweep id.
+SWEEP_ID = REPLACE_WITH_SWEEP_ID
+arguments = $(SWEEP_ID) 4
+
+output = job_outputs/tune_stage1_simmim/agent.$(Cluster).$(Process).out
+error  = job_outputs/tune_stage1_simmim/agent.$(Cluster).$(Process).err
+log    = job_outputs/tune_stage1_simmim/agent.$(Cluster).log
+
+request_cpus   = 4
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 36000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb))
+
+getenv = True
+
++JobBatchName = "ai4exomars-tune-stage1-simmim"
+
+# 1200 steps × ~16 s/step observed ≈ 5.3 h; +2.7 h headroom.
+MaxTime = 28800
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+# Submit N jobs to run N parallel agents (one trial each).
+queue 4

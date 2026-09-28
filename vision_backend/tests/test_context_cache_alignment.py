@@ -16,6 +16,7 @@ deliberately permuting a correct cache and requiring the check to fail.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import json
 import subprocess
 import sys
@@ -27,7 +28,11 @@ import rasterio
 from rasterio.transform import Affine
 
 from vision_backend.prep_seg_context_cache import context_window
-from vision_backend.seg_dataset import SegmentationCropDataset, load_seg_records
+from vision_backend.seg_dataset import (
+    SegmentationCropDataset,
+    load_seg_records,
+    partition_records,
+)
 
 IMG = 4096
 CROP = 512
@@ -161,8 +166,48 @@ def test_live_read_matches_the_cache_exactly(scene):
         assert float((a - b).abs().max()) == 0.0, f"sample {i}: cache != live read"
 
 
+def test_full_manifest_cache_is_accepted_for_a_train_val_split(scene):
+    """The regression that held the v1/v3 variant sweeps for 4 days.
+
+    The cache is built over the WHOLE manifest and addressed by `rec.index`,
+    which `partition_records` preserves. So on any manifest that has a val
+    split, the cache necessarily has MORE rows than the train split has
+    records -- the correct state of affairs. The old check demanded
+    `count == len(records)` and rejected it: 55,702 cache rows vs a 53,971-row
+    train split, every trial dead in under a second.
+
+    The fixture's own manifest is all-train, which is exactly why the suite
+    missed this; this test splits it.
+    """
+    records = [
+        dataclasses.replace(record, split="val" if i % 8 == 0 else "train")
+        for i, record in enumerate(scene["records"])
+    ]
+    train_records, val_records = partition_records(records)
+    assert val_records, "fixture must actually produce a val split"
+    assert len(train_records) < len(scene["records"])
+
+    for split in (train_records, val_records):
+        dataset = SegmentationCropDataset(
+            split, imagery_path=scene["dir"] / "img.tif",
+            label_path=scene["dir"] / "lab.tif",
+            use_context=True, context_cache_dir=scene["cache"],
+            spatial_jitter_px=0,
+        )
+        assert len(dataset) == len(split)
+        # Accepting the cache is only right if it still pairs correctly: the
+        # last val record is the one furthest from its position in the split.
+        record = split[-1]
+        centre = round(float(dataset[len(split) - 1]["context"][0, 128, 128]) * 127.5 + 127.5)
+        expected = _encode(record.row + CROP // 2, record.col + CROP // 2)
+        assert abs(centre - expected) <= 1, (
+            f"split record {record.index} got context centred on {centre}, "
+            f"expected {expected}"
+        )
+
+
 def test_cache_with_the_wrong_row_count_is_rejected(scene):
-    """A cache built from a different manifest must not load silently."""
+    """A cache too short to span the manifest must not load silently."""
     bad = scene["dir"] / "bad_cache"
     bad.mkdir(exist_ok=True)
     context = np.load(scene["cache"] / "context.npy", mmap_mode="r")

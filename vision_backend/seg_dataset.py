@@ -75,6 +75,43 @@ def partition_records(records: Sequence[SegCropRecord]):
     return train, val
 
 
+def _check_cache_spans_split(
+    cache_rows: int,
+    records: Sequence[SegCropRecord],
+    *,
+    cache_kind: str,
+    manifest: object = None,
+) -> None:
+    """Verify a `rec.index`-addressed cache covers every record in this split.
+
+    Both caches are written one row per manifest row in `load_seg_records`
+    order and read back as `cache[rec.index]` -- where `index` is the position
+    in the *full* manifest, deliberately preserved through `partition_records`
+    and the `train_fraction` subsample (see the note there). So the test is
+    that the cache spans the highest index this split uses.
+
+    It is emphatically NOT `cache_rows == len(records)`: a split is a subset of
+    the manifest, so that only holds when the split happens to BE the whole
+    manifest. Requiring it rejected a perfectly good full-manifest cache for
+    every manifest carrying both a train and a val split -- which is what held
+    the v1/v3 variant sweeps (cache 55,702 rows, train split 53,971 records).
+
+    This is a bounds check, not an alignment check. A cache that is merely
+    REORDERED has the right length and passes here; only a content check can
+    catch that -- `prep_seg_context_cache.py --verify-only`, per
+    tests/test_context_cache_alignment.py.
+    """
+    max_index = max((rec.index for rec in records), default=-1)
+    if max_index >= cache_rows:
+        raise ValueError(
+            f"{cache_kind} cache has {cache_rows} rows but this split "
+            f"references manifest row {max_index}; it was built from "
+            f"{manifest!r}. Rows are addressed by rec.index, so a cache that "
+            f"does not span the manifest would pair crops with the wrong "
+            f"data. Rebuild it from the manifest this run loads."
+        )
+
+
 def _accumulate_class_counts(
     counts: np.ndarray,
     arr: np.ndarray,
@@ -306,6 +343,14 @@ class SegmentationCropDataset(Dataset):
                     f"(built from {meta.get('manifest')!r}); rebuild the cache "
                     f"with --jitter-margin >= {self.spatial_jitter_px}."
                 )
+            # `_read_cached` slices images[rec.index] with no bounds check of
+            # its own: a cache built from a shorter manifest would either
+            # IndexError deep in a worker or, worse, silently serve some other
+            # crop's pixels. Same contract as the context cache below.
+            _check_cache_spans_split(
+                int(meta["count"]), self.records,
+                cache_kind="crop", manifest=meta.get("manifest"),
+            )
 
         # --- context branch (off by default: Phase-1 loading is untouched) ---
         # A wide window centred on the crop, downsampled, for the context-aware
@@ -324,14 +369,10 @@ class SegmentationCropDataset(Dataset):
             cmeta = json.loads(
                 (self.context_cache_dir / "context_meta.json").read_text()
             )
-            if int(cmeta["count"]) != len(self.records):
-                raise ValueError(
-                    f"context cache has {cmeta['count']} rows but this split has "
-                    f"{len(self.records)} records; it was built from "
-                    f"{cmeta.get('manifest')!r}. Rows are addressed by "
-                    f"rec.index, so a mismatched cache would pair crops with "
-                    f"the wrong neighbourhood."
-                )
+            _check_cache_spans_split(
+                int(cmeta["count"]), self.records,
+                cache_kind="context", manifest=cmeta.get("manifest"),
+            )
             self.context_size = int(cmeta["context_size"])
             self.context_output_size = int(cmeta["context_output_size"])
 

@@ -1,9 +1,9 @@
-w#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 cd /home/gtirpitz/AI4ExoMars
 
-mkdir -p results/stage1_training job_outputs/stage1_training
+mkdir -p results/tune_stage1_50ep job_outputs/stage1_training_50ep
 
 if [ -f /etc/profile.d/modules.sh ]; then
   source /etc/profile.d/modules.sh
@@ -15,9 +15,6 @@ fi
 
 source .venv/bin/activate
 
-# Add bundled CUDA runtime libs from PyTorch's nvidia-*-cu13 wheel packages.
-# torch 2.12+cu130 ships its own CUDA 13.0 runtime, so LD_LIBRARY_PATH must
-# point at those dirs even when the system module is older or absent.
 prepend_ld_path() {
   if [[ -d "$1" ]]; then
     export LD_LIBRARY_PATH="$1:${LD_LIBRARY_PATH:-}"
@@ -53,17 +50,40 @@ nvidia-smi -L || true
 python -c 'import torch; print("torch", torch.__version__, "cuda", torch.cuda.is_available())'
 
 python -m vision_backend.train_stage1_teacher_ssl \
-  --index-path hirise_context_pairs/patch_index.csv \
+  --index-path data/patch_index.csv \
   --dataset-backend auto \
-  --epochs 10 \
-  --batch-size "${BATCH_SIZE:-8}" \
-  --num-workers "${NUM_WORKERS:-4}" \
-  --val-fraction "${VAL_FRACTION:-0.1}" \
-  --test-fraction "${TEST_FRACTION:-0.1}" \
+  --epochs 50 \
+  --batch-size 32 \
+  --num-workers 4 \
+  --val-fraction 0.1 \
+  --test-fraction 0 \
+  --local-input-size 256 \
+  --context-input-size 256 \
+  --local-base-channels 48 \
+  --context-base-channels 24 \
+  --context-dim 256 \
+  --decoder-channels 256 \
+  --swin-depths 2 2 2 \
+  --swin-num-heads 4 8 16 \
+  --window-size 8 \
+  --drop-path 0 \
+  --mask-patch-size 8 \
+  --mask-ratio 0.5 \
+  --loss-type l1 \
   --use-muon \
-  --initial-checkpoint-path results/stage1_training/stage1_initial_model.pt \
-  --checkpoint-path results/stage1_training/stage1_best_model.pt \
-  --final-checkpoint-path results/stage1_training/stage1_final_model.pt \
-  --history-path results/stage1_training/stage1_loss_trajectory.csv \
-  --examples-path results/stage1_training/stage1_examples.pt \
+  --learning-rate 0.0018792598465717752 \
+  --weight-decay 0.0020406330520434737 \
+  --warmup-fraction 0.11011581589732208 \
+  --adam-beta1 0.9438701951139566 \
+  --adam-beta2 0.950022063641192 \
+  --adam-eps 1.9904139414832822e-9 \
+  --muon-momentum 0.8975859368554203 \
+  --muon-ns-steps 5 \
+  --seed 42 \
+  --initial-checkpoint-path results/tune_stage1_50ep/initial.pt \
+  --checkpoint-path results/tune_stage1_50ep/best.pt \
+  --final-checkpoint-path results/tune_stage1_50ep/final.pt \
+  --history-path results/tune_stage1_50ep/history.csv \
+  --examples-path results/tune_stage1_50ep/examples.pt \
+  --num-examples 5 \
   "$@"

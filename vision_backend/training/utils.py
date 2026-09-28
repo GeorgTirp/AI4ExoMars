@@ -202,28 +202,53 @@ def _compute_segmentation_metrics(
     num_classes: int,
     ignore_index: int,
 ) -> dict[str, float]:
+    """Pixel accuracy and mean IoU for one batch.
+
+    Built from a single fused confusion matrix rather than a per-class mask
+    loop. The loop cost two device syncs per class -- every `.item()` drains
+    the CUDA queue before the next kernel can be enqueued -- so with 14 DC
+    classes plus the 5-class IG head it spent ~45 syncs on *every* training
+    step. At the default batch_size=4 (13,492 steps/epoch on the full NOAH-H
+    manifest) that serialization is a large fraction of the step. Same
+    arithmetic, computed on-device, synced once at the return.
+    """
     with torch_module.no_grad():
         preds = logits.argmax(dim=1)
-        valid_mask = targets != ignore_index
-        if valid_mask.sum() == 0:
+        valid = targets != ignore_index
+        # Keep the histogram's indices in range. `preds` is an argmax so it is
+        # always in [0, num_classes); a stray out-of-range label would land in
+        # the wrong cell. Such a pixel can never be correct (no prediction
+        # matches it), so dropping it here leaves the accuracy numerator
+        # unchanged, and `total` below still counts it -- as the loop did.
+        in_range = valid & (targets >= 0) & (targets < num_classes)
+        t = targets[in_range].reshape(-1)
+        p = preds[in_range].reshape(-1)
+
+        conf = torch_module.bincount(
+            t * num_classes + p, minlength=num_classes * num_classes,
+        ).reshape(num_classes, num_classes)
+
+        intersection = conf.diagonal()                       # per class
+        union = conf.sum(0) + conf.sum(1) - intersection
+        present = union > 0
+        # Classes absent from both prediction and target are skipped, not
+        # counted as 0 IoU -- clamp_min(1) only guards those 0/0 cells.
+        iou = torch_module.where(
+            present,
+            intersection.double() / union.clamp_min(1).double(),
+            torch_module.zeros_like(union, dtype=torch_module.float64),
+        )
+        total = valid.sum()
+        pixel_acc, miou, total_valid = torch_module.stack(
+            [
+                intersection.sum().double() / total.clamp_min(1).double(),
+                iou.sum() / present.sum().clamp_min(1).double(),
+                total.double(),
+            ]
+        ).tolist()  # the single sync
+        if total_valid == 0:
             return {"pixel_acc": 0.0, "miou": 0.0}
-
-        correct = (preds[valid_mask] == targets[valid_mask]).sum().item()
-        total = valid_mask.sum().item()
-        pixel_acc = correct / max(total, 1)
-
-        ious: list[float] = []
-        for class_index in range(num_classes):
-            pred_mask = (preds == class_index) & valid_mask
-            target_mask = (targets == class_index) & valid_mask
-            intersection = (pred_mask & target_mask).sum().item()
-            union = (pred_mask | target_mask).sum().item()
-            if union == 0:
-                continue
-            ious.append(intersection / union)
-
-        miou = float(sum(ious) / max(len(ious), 1))
-        return {"pixel_acc": float(pixel_acc), "miou": miou}
+        return {"pixel_acc": float(pixel_acc), "miou": float(miou)}
 
 
 def compute_class_weights(
