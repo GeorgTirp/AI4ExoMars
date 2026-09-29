@@ -39,7 +39,9 @@ request_gpus   = 1
 # which node each job landed on. Change BATCH_SIZE and this pin together.
 min_gpu_mem_mb = 40000
 requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
-                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB")
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet")
 
 # VARIANT, SWEEP_ID and WANDB_API_KEY come from the submitting shell via getenv
 # (or ~/.netrc for wandb -- see run_variant_sweep.sh).
@@ -72,4 +74,8 @@ on_exit_hold_reason = "Variant agent exited non-zero -- check the .err log"
 # truncates the .err on each restart, so the retry destroys the log of the
 # failure you would need to diagnose. Release by hand after reading the log.
 
-queue 4
+# Trials per variant. 3 gives a best-of-3 per architecture; override with
+# NTRIALS when a variant needs replacements for lost runs.
+NTRIALS = $ENV(NTRIALS:3)
+
+queue $(NTRIALS)

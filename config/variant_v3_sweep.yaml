@@ -49,10 +49,15 @@ parameters:
   # --grad-clip-norm 1.0. The old range was set while weight decay was silently
   # crushing the model, so nothing ever reached a regime where a hot LR could
   # diverge. Identical across v0-v3.
+  # 2026-09-29: ceiling cut again, 1e-3 -> 2e-4, on 16 trials of evidence.
+  # EVERY trial at lr >= 2.23e-4 hit non-finite loss within 2-9 epochs (11 of
+  # 11, across all four variants, with --grad-clip-norm 1.0 active). Both
+  # trials at <= 1.8e-4 ran to completion. The threshold is sharp, so the old
+  # range spent ~70% of its probability mass on runs that could not finish.
   optimization.learning_rate:
     distribution: log_uniform_values
-    min: 1.0e-4
-    max: 1.0e-3
+    min: 5.0e-5
+    max: 2.0e-4
 
   # Narrowed from 1e-4 .. 1e-1 on 2026-09-28. Weight decay is what destroyed
   # the 2026-08-27 runs: create_optimizer applied it to LayerNorm/bias/layer-

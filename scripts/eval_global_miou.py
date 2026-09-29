@@ -72,16 +72,19 @@ def evaluate_checkpoint(
         ckpt_path, device=str(device)
     )
 
+    # The value the training run itself recorded at the epoch this checkpoint
+    # was saved. Read it from the checkpoint, NOT from config["output"]
+    # ["history_path"]: that path is resolved at eval time and, with sweeps
+    # writing several trials, routinely points at another run's CSV or at a
+    # stale file -- it reported 0.0739 for a checkpoint whose own metrics say
+    # 0.1690. Since the training loop now accumulates a global confusion
+    # matrix, this should agree with global_miou below; a disagreement means
+    # the checkpoint predates that change.
     reported_val_miou = None
     try:
-        history_path = resolve_path(config["output"]["history_path"])
-        if history_path.exists():
-            import csv
-
-            rows = list(csv.DictReader(history_path.open()))
-            if rows:
-                best = max(rows, key=lambda r: float(r["val_miou"]))
-                reported_val_miou = float(best["val_miou"])
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        reported_val_miou = float(ckpt.get("metrics", {}).get("miou"))
+        del ckpt
     except Exception:
         pass
 
@@ -91,10 +94,13 @@ def evaluate_checkpoint(
             f"num_classes={num_classes_from_config}"
         )
 
-    intersection = torch.zeros(num_classes, dtype=torch.int64)
-    union = torch.zeros(num_classes, dtype=torch.int64)
-    correct_total = 0
-    valid_total = 0
+    # One global confusion matrix (rows = truth, cols = prediction) rather than
+    # per-class masks. It yields intersection/union for free, costs one kernel
+    # per batch instead of 4*num_classes with a .item() on each, and -- the
+    # reason it is here -- it says WHAT a class is confused with, which is what
+    # decides whether a weak class needs a different loss, more capacity, or
+    # better labels.
+    conf = torch.zeros(num_classes, num_classes, dtype=torch.int64, device=device)
 
     with torch.no_grad():
         for batch in dataloader:
@@ -105,16 +111,18 @@ def evaluate_checkpoint(
 
             logits = model(local, context_tensor) if context_tensor is not None else model(local)
             preds = logits.argmax(dim=1)
-            valid_mask = target != ignore_index
+            in_range = (target != ignore_index) & (target >= 0) & (target < num_classes)
+            t = target[in_range].reshape(-1)
+            p = preds[in_range].reshape(-1)
+            conf += torch.bincount(
+                t * num_classes + p, minlength=num_classes * num_classes
+            ).reshape(num_classes, num_classes)
 
-            correct_total += int((preds[valid_mask] == target[valid_mask]).sum().item())
-            valid_total += int(valid_mask.sum().item())
-
-            for class_index in range(num_classes):
-                pred_mask = (preds == class_index) & valid_mask
-                target_mask = (target == class_index) & valid_mask
-                intersection[class_index] += (pred_mask & target_mask).sum().item()
-                union[class_index] += (pred_mask | target_mask).sum().item()
+    conf = conf.cpu()
+    intersection = conf.diagonal().clone()
+    union = conf.sum(0) + conf.sum(1) - intersection
+    correct_total = int(intersection.sum())
+    valid_total = int(conf.sum())
 
     present = union > 0
     per_class_iou = torch.where(
@@ -133,6 +141,7 @@ def evaluate_checkpoint(
         "per_class_iou": per_class_iou,
         "intersection": intersection,
         "union": union,
+        "confusion": conf,
     }
 
 
@@ -144,7 +153,7 @@ def print_checkpoint_report(result: dict, *, split: str) -> None:
 
     print(f"=== {ckpt_path.name} ===")
     if result["reported_val_miou"] is not None:
-        print(f"  training-reported val_miou (per-batch average, best epoch): {result['reported_val_miou']:.4f}")
+        print(f"  val_miou recorded by the run at this checkpoint's epoch: {result['reported_val_miou']:.4f}")
     print(
         f"  GLOBAL confusion-matrix mIoU ({split}, {int(present.sum())}/{num_classes} classes present): "
         f"{result['global_miou']:.4f}"
@@ -162,6 +171,43 @@ def print_checkpoint_report(result: dict, *, split: str) -> None:
     absent = [class_name(c) for c in range(num_classes) if not present[c]]
     if absent:
         print(f"  Absent from {split} split entirely (no predicted or true pixels): {', '.join(absent)}")
+    print()
+
+
+def print_confusions(result: dict, *, max_classes: int = 6, min_share: float = 0.10) -> None:
+    """For the weakest classes, where does their truth actually get sent?
+
+    A class can score a low IoU for opposite reasons -- its pixels are handed
+    to one specific neighbour (a discrimination problem, fixable with loss or
+    capacity), or they are scattered (a label-quality or feature problem). The
+    prescription differs, so print the split rather than just the score.
+    """
+    conf = result.get("confusion")
+    if conf is None:
+        return
+    per_class_iou = result["per_class_iou"]
+    present = result["present"]
+    order = sorted(
+        (i for i in range(result["num_classes"]) if bool(present[i])),
+        key=lambda i: float(per_class_iou[i]),
+    )[:max_classes]
+    print("  Where each weak class's true pixels actually go:")
+    for i in order:
+        row = conf[i]
+        total = int(row.sum())
+        if total == 0:
+            continue
+        recall = int(row[i]) / total
+        parts = []
+        for j in sorted(range(len(row)), key=lambda j: int(row[j]), reverse=True):
+            share = int(row[j]) / total
+            if share < min_share or j == i:
+                continue
+            parts.append(f"{share*100:.0f}% -> {class_name(j)}")
+            if len(parts) == 3:
+                break
+        print(f"    {class_name(i):<52s} IoU={float(per_class_iou[i]):.4f} "
+              f"recall={recall*100:5.1f}%  {'; '.join(parts) if parts else '(scattered)'}")
     print()
 
 
@@ -214,6 +260,12 @@ def main() -> None:
              "even if not repeated in `checkpoints`).",
     )
     parser.add_argument("--loader-config-path", default=DEFAULT_LOADER_CONFIG)
+    parser.add_argument(
+        "--context-cache-dir", default=None,
+        help="Context crop cache (prep_seg_context_cache.py output). Required to\n"
+             "evaluate a checkpoint whose model was built with use_context=True; "
+             "without it the loader falls back to a slow live per-item read.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--ignore-index", type=int, default=255)
@@ -253,16 +305,41 @@ def main() -> None:
     )
     num_classes_from_config = loader_kwargs.get("num_classes")
 
-    loaders = load_loader_bundle("vision_backend.seg_dataset:create_segmentation_dataloaders", loader_kwargs)
-    dataloader = loaders[args.split]
-    dataset = loaders.get(f"{args.split}_dataset")
-    n_crops = len(dataset.records) if dataset is not None and hasattr(dataset, "records") else "?"
-    print(f"Split: {args.split} ({n_crops} crops)\n")
+    # A context-branch model needs the loader to SERVE context crops. Building
+    # one context-free loader for every checkpoint made the context variants
+    # (v1/v3) die with "built with use_context=True but got context_x=None",
+    # i.e. this evaluator could not score half the variant comparison. Whether
+    # context is needed is a property of each checkpoint, so build (and reuse)
+    # one loader per configuration rather than assuming.
+    _loader_cache: dict[bool, tuple] = {}
+
+    def _loader_for(use_context: bool):
+        if use_context not in _loader_cache:
+            kwargs = dict(loader_kwargs)
+            if use_context:
+                kwargs["use_context"] = True
+                if args.context_cache_dir:
+                    kwargs["context_cache_dir"] = args.context_cache_dir
+            bundle = load_loader_bundle(
+                "vision_backend.seg_dataset:create_segmentation_dataloaders", kwargs
+            )
+            ds = bundle.get(f"{args.split}_dataset")
+            n = len(ds.records) if ds is not None and hasattr(ds, "records") else "?"
+            print(f"Split: {args.split} ({n} crops, context={'on' if use_context else 'off'})\n")
+            _loader_cache[use_context] = bundle[args.split]
+        return _loader_cache[use_context]
+
+    def _needs_context(ckpt_path_str: str) -> bool:
+        try:
+            ck = torch.load(ckpt_path_str, map_location="cpu", weights_only=False)
+            return bool(ck.get("config", {}).get("model", {}).get("use_context", False))
+        except Exception:
+            return False
 
     def _evaluate(ckpt_path_str: str) -> dict:
         return evaluate_checkpoint(
             Path(ckpt_path_str),
-            dataloader=dataloader,
+            dataloader=_loader_for(_needs_context(ckpt_path_str)),
             ignore_index=args.ignore_index,
             device=device,
             num_classes_from_config=num_classes_from_config,
@@ -286,6 +363,7 @@ def main() -> None:
         result = _evaluate(ckpt_path_str)
         results_by_path[ckpt_path_str] = result
         print_checkpoint_report(result, split=args.split)
+        print_confusions(result)
         if baseline_result is not None:
             print_delta_table(baseline_result, result)
 
