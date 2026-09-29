@@ -72,7 +72,25 @@ DER="${DER:-data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived}"
 LOADER_CONFIG="${LOADER_CONFIG:-$DER/seg_loader_DC_full.json}"
 CONTEXT_CACHE_DIR="${CONTEXT_CACHE_DIR:-$DER/seg_context_cache_full}"
 CROP_CACHE_DIR="${CROP_CACHE_DIR:-$DER/seg_crop_cache_full}"
-OUT_TAG="variant_${VARIANT}"
+# Context fusion (see ContextAwareConvNeXtSwinEncoder): "film" is the original
+# pooled-vector conditioning; "xattn" keeps the context grid and cross-attends to
+# it at the bottleneck. Only meaningful for the context variants, and an xattn run
+# gets its own output tag + variant id so it can never be read as, or averaged
+# into, the FiLM result for the same variant.
+CONTEXT_FUSION="${CONTEXT_FUSION:-film}"
+case "$CONTEXT_FUSION" in
+  film|xattn) ;;
+  *) echo "ERROR: CONTEXT_FUSION must be film or xattn (got '$CONTEXT_FUSION')" >&2; exit 1 ;;
+esac
+if [ "$CONTEXT_FUSION" != "film" ] && [ "$CONTEXT_FLAG" != "--use-context" ]; then
+  echo "ERROR: CONTEXT_FUSION=$CONTEXT_FUSION needs a context variant (v1 or v3), got $VARIANT" >&2
+  exit 1
+fi
+VARIANT_ID="$VARIANT"
+if [ "$CONTEXT_FUSION" != "film" ]; then
+  VARIANT_ID="${VARIANT}_${CONTEXT_FUSION}"
+fi
+OUT_TAG="variant_${VARIANT_ID}"
 
 mkdir -p "checkpoints/${OUT_TAG}" "job_outputs/${OUT_TAG}"
 
@@ -146,7 +164,7 @@ export WANDB_CONSOLE=wrap
 export WANDB_DIR="${WANDB_DIR:-$PWD/job_outputs/${OUT_TAG}}"
 
 echo "Host: $(hostname)"
-echo "Variant: $VARIANT  ($SIZE encoder, context ${CONTEXT_FLAG#--})"
+echo "Variant: $VARIANT_ID  ($SIZE encoder, context ${CONTEXT_FLAG#--}, fusion $CONTEXT_FUSION)"
 echo "  local_base=$LOCAL_BASE context_base=$CONTEXT_BASE context_dim=$CONTEXT_DIM decoder_channels=$DECODER_CH"
 echo "Sweep: $SWEEP_ID"
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true
@@ -181,7 +199,8 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --ema-decay 0.9999 \
   --llrd 1.0 \
   --per-run-checkpoint \
-  --variant-id "$VARIANT" \
+  --context-fusion "$CONTEXT_FUSION" \
+  --variant-id "$VARIANT_ID" \
   --variant-metrics-path "results/variant_comparison/${OUT_TAG}.jsonl" \
   --checkpoint-path "checkpoints/${OUT_TAG}/best.pt" \
   --wandb \
@@ -189,7 +208,7 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --wandb-project "${WANDB_PROJECT:-ai4exomars}" \
   --wandb-group "${WANDB_GROUP:-model-variants}" \
   --wandb-job-type "variant_${VARIANT}" \
-  --wandb-tags variants "$VARIANT" "$SIZE" "context-${CONTEXT_FLAG#--no-}" \
+  --wandb-tags variants "$VARIANT" "$SIZE" "context-${CONTEXT_FLAG#--no-}" "fusion-${CONTEXT_FUSION}" \
   --wandb-sweep-id "$SWEEP_ID" \
   --wandb-sweep-count "${SWEEP_COUNT:-4}" \
   "$@"
