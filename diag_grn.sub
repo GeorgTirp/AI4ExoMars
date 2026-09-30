@@ -1,12 +1,11 @@
 universe   = vanilla
 initialdir = /home/gtirpitz/AI4ExoMars
 
-executable = eval_miou.sh
-arguments  = checkpoints/variant_v2/best_30ep_sm95x8oj.pt checkpoints/variant_v2/best_30ep_e99i6eid.pt checkpoints/variant_v2/best_30ep_p7bdro9r.pt checkpoints/variant_v3/best_30ep_xqi830h7.pt checkpoints/variant_v3/best_30ep_bvoh8joy.pt checkpoints/variant_v3/best_30ep_7uakaz56.pt --batch-size 4 --loader-config-path data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_loader_DC_full.json --context-cache-dir data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_context_cache_full
+executable = diag_grn.sh
 
-output = job_outputs/eval/eval.$(Cluster).$(Process).out
-error  = job_outputs/eval/eval.$(Cluster).$(Process).err
-log    = job_outputs/eval/eval.$(Cluster).log
+output = job_outputs/diag/grn.$(Cluster).$(Process).out
+error  = job_outputs/diag/grn.$(Cluster).$(Process).err
+log    = job_outputs/diag/grn.$(Cluster).log
 
 request_cpus   = 8
 request_memory = 32768
@@ -18,7 +17,7 @@ requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
 
 getenv = True
 
-+JobBatchName = "ai4exomars-eval-miou"
++JobBatchName = "ai4exomars-diag-grn"
 
 # A few hundred steps on a few hundred crops: minutes, not hours. The ceiling is
 # here only so a hang cannot quietly bill a GPU slot all day.

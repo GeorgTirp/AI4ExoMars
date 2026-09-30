@@ -38,6 +38,14 @@ class GRN(nn.Module):
         self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
         self.beta = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
+    # Excluded from torch.compile. Compiled, this block yields non-finite
+    # gradients from the first step (10-12 of 12 steps on real batches), in bf16
+    # AND fp16, and neither an fp32 norm nor eps-inside-the-sqrt fixes it; eager
+    # GRN inside an otherwise compiled model is clean (0 of 12) and still 21%
+    # faster than a fully eager model -- scripts/diag_compile_grn.py. Under fp16
+    # the GradScaler hides this by skipping every affected update, so a compiled
+    # fp16 run can report finite losses while its weights barely move.
+    @torch.compiler.disable
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # global spatial response per channel
         gx = torch.norm(x, p=2, dim=(2, 3), keepdim=True)  # [B, C, 1, 1]
