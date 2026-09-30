@@ -176,6 +176,16 @@ def parse_args() -> argparse.Namespace:
              "img/s on an RTX 3070) for a one-off ~70s compile.",
     )
     parser.add_argument(
+        "--amp-dtype", choices=("fp16", "bf16"), default="fp16",
+        help="Mixed-precision dtype on CUDA. fp16 (default) is the historical "
+             "setting. Use bf16 for any encoder built from ConvNeXt-V2 blocks -- "
+             "i.e. the SimMIM HybridEncoder: GRN takes an L2 norm over the whole "
+             "spatial map, a sum of squares that overflows fp16's 65,504 ceiling "
+             "on ordinary batches and turns the loss NaN. The HybridEncoder was "
+             "also PRETRAINED in bf16. Both A/B arms diverged in fp16 on nearly "
+             "the same batch at lr 4.5e-5.",
+    )
+    parser.add_argument(
         "--channels-last", action="store_true",
         help="Use channels_last memory format (~1.17x here).",
     )
@@ -376,6 +386,7 @@ def build_config(args: argparse.Namespace) -> dict:
         "runtime": {
             "compile": args.compile,
             "channels_last": args.channels_last,
+            "amp_dtype": args.amp_dtype,
         },
         "model": {
             "model_kind": args.model_kind,
@@ -835,6 +846,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             optimizer=optimizer,
             scheduler=scheduler,
             use_amp=use_amp,
+            amp_dtype=runtime.get("amp_dtype", "fp16"),
             accum_steps=accum_steps,
             class_weights=class_weights,
             loss_kind=loss_kind,

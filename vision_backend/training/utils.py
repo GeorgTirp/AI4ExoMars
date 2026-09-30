@@ -544,6 +544,10 @@ def run_segmentation_epoch(
     # F5: EMA. None (default) = no EMA tracking, current behavior.
     ema=None,
     ema_source_model=None,
+    # Mixed-precision dtype on CUDA. "fp16" (default) is the historical
+    # behaviour and needs a GradScaler; "bf16" has fp32's exponent range, so it
+    # cannot overflow where fp16 does and needs no scaler.
+    amp_dtype: str = "fp16",
 ) -> dict[str, float]:
     try:
         from tqdm.auto import tqdm
@@ -599,9 +603,14 @@ def run_segmentation_epoch(
             from training.hierarchy import map_dc_labels_to_ig
 
     use_cuda_amp = bool(use_amp and device.type == "cuda")
+    if amp_dtype not in ("fp16", "bf16"):
+        raise ValueError(f"amp_dtype must be 'fp16' or 'bf16', got {amp_dtype!r}")
+    autocast_dtype = torch_module.bfloat16 if amp_dtype == "bf16" else torch_module.float16
+    # Loss scaling exists only to keep fp16 gradients out of the underflow range;
+    # bf16 shares fp32's exponent range and must NOT be scaled.
     scaler = (
         torch_module.amp.GradScaler("cuda", enabled=True)
-        if training and use_cuda_amp
+        if training and use_cuda_amp and amp_dtype == "fp16"
         else None
     )
 
@@ -678,7 +687,7 @@ def run_segmentation_epoch(
                     return dc_logits, None, dc_loss_fn(dc_logits, target)
 
                 autocast_context = (
-                    torch_module.amp.autocast(device_type="cuda", enabled=True)
+                    torch_module.amp.autocast(device_type="cuda", dtype=autocast_dtype, enabled=True)
                     if use_cuda_amp
                     else None
                 )
