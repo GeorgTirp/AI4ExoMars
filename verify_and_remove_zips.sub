@@ -1,0 +1,32 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = verify_and_remove_zips.sh
+
+output = job_outputs/zips/verify.$(Cluster).$(Process).out
+error  = job_outputs/zips/verify.$(Cluster).$(Process).err
+log    = job_outputs/zips/verify.$(Cluster).log
+
+# No GPU: a single-threaded rasterio read loop over the mosaic and the label
+# raster, writing two memmapped uint8 arrays (~37 GB total) to the shared FS.
+request_cpus   = 2
+request_memory = 32768
+request_disk   = 4096
+
+getenv = True
+
++JobBatchName = "ai4exomars-remove-zips"
+
+# ~1-2 h expected; 6 h ceiling leaves room for a cold/contended filesystem.
+MaxTime = 21600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Zip verification exceeded MaxTime"
+
+# prep_seg_crop_cache pre-allocates the full memmap up front and writes meta.json
+# only on success, so an interrupted build leaves correctly-shaped but partly
+# zero-filled arrays with no meta.json -- which is exactly what every consumer
+# keys off. Hold rather than retry, and delete the partial out-dir before a redo.
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Zip verification failed -- check the .err log"
+
+queue 1

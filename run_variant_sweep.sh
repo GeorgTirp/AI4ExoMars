@@ -19,14 +19,16 @@ set -euo pipefail
 #   VARIANT=v0 SWEEP_ID=entity/ai4exomars/<id> ./run_variant_sweep.sh
 #   VARIANT=v0 SWEEP_ID=... condor_submit run_variant_sweep.sub
 #
-# Throughput (after the 2026-08-27 launch spent 36 h/agent and produced nothing):
-#   * the padded crop cache is now REQUIRED -- see the CROP_CACHE_DIR check below
-#   * BATCH_SIZE defaults to 8, not the script default of 4. At 4, the full
-#     manifest is 13,492 optimizer steps per epoch on an A100-80GB that is
-#     nowhere near full. Raising it changes the LR that the sweep should find,
-#     so the swept range is only comparable across runs at the SAME batch size.
-#   * --compile (measured 2.1x) and --channels-last (1.17x) are further levers,
-#     left off here because neither has been exercised on this model yet.
+# Throughput and memory (all measured on A100-40GB):
+#   * the padded crop cache is REQUIRED -- see the CROP_CACHE_DIR check below
+#   * BATCH_SIZE defaults to 4 at 512 px: batch 16 OOMs a 40 GB card and the big
+#     variants already peak at ~36.5 GB at batch 4. For 1024 px inputs use
+#     BATCH_SIZE=1 -- the same pixels per step, so the swept LR range still
+#     applies. The swept range is only comparable across runs at equal pixels
+#     per step.
+#   * --compile is on (COMPILE=1): 0.45 -> 0.15 s/step for the ConvNeXt-Swin
+#     variants. The HybridEncoder's GRN is excluded from compilation separately
+#     (blocks_v2.GRN), because compiled GRN yields non-finite gradients.
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,6 +91,13 @@ fi
 VARIANT_ID="$VARIANT"
 if [ "$CONTEXT_FUSION" != "film" ]; then
   VARIANT_ID="${VARIANT}_${CONTEXT_FUSION}"
+fi
+# RUN_TAG separates runs that share a variant but change the data or input
+# size -- e.g. RUN_TAG=1024 for the 1024x1024 single-branch test, which would
+# otherwise append to variant_v2.jsonl and checkpoints/variant_v2 alongside the
+# 512 results it is being compared against.
+if [ -n "${RUN_TAG:-}" ]; then
+  VARIANT_ID="${VARIANT_ID}_${RUN_TAG}"
 fi
 OUT_TAG="variant_${VARIANT_ID}"
 
