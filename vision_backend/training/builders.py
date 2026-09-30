@@ -35,6 +35,10 @@ def build_context_encoder(model_config: dict[str, Any]) -> ContextAwareConvNeXtS
         window_size=model_config["window_size"],
         drop_path=model_config.get("drop_path", 0.0),
         use_context=bool(model_config.get("use_context", True)),
+        # Absent from every checkpoint written before these options existed, so the
+        # defaults must reproduce the original model exactly: FiLM, 2048/512.
+        context_fusion=model_config.get("context_fusion", "film"),
+        context_extent_ratio=float(model_config.get("context_extent_ratio", 4.0)),
     )
 
 

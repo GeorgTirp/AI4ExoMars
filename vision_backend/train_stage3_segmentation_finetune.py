@@ -264,6 +264,15 @@ def parse_args() -> argparse.Namespace:
         help="Run the context-aware encoder as a single (local) branch: no "
              "context sub-encoder, no FiLM conditioning, no context crops needed.",
     )
+    parser.add_argument(
+        "--context-fusion", choices=("film", "xattn"), default="film",
+        help="How the context branch conditions the local branch (model-kind "
+             "context with --use-context). 'film' (default): pooled to one global "
+             "vector that FiLM-modulates the local maps -- scene-level, no spatial "
+             "correspondence. 'xattn': the context grid is kept and the local "
+             "bottleneck cross-attends to it, with positions in a shared frame, so "
+             "the model knows WHERE in the 494 m window a pattern sits.",
+    )
     parser.add_argument("--strict-checkpoint-load", action="store_true")
     # simmim (single-branch HybridEncoder) hyperparameters
     parser.add_argument("--global-base-grid", type=int, default=32)
@@ -409,6 +418,7 @@ def build_config(args: argparse.Namespace) -> dict:
             # None -> leave the encoder family default (context on); the
             # variant sweeps set it explicitly.
             **({} if args.use_context is None else {"use_context": args.use_context}),
+            "context_fusion": args.context_fusion,
         },
         "initialization": {
             "encoder_checkpoint": args.encoder_checkpoint,
@@ -665,6 +675,30 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     model_kind = model_config.get("model_kind", "simmim")
     strict = bool(initialization["strict_checkpoint_load"])
     random_init = bool(initialization.get("random_init_encoder", False))
+
+    if (
+        model_kind == "context"
+        and model_config.get("use_context", True)
+        and model_config.get("context_fusion", "film") == "xattn"
+    ):
+        # Spatial fusion places context cells relative to the local crop, so it
+        # needs the true ratio of window to crop -- taken from the data actually
+        # being served, never assumed. Written into config["model"] too: that is
+        # what the checkpoint persists (model_config is a working copy), and a
+        # reload must rebuild the same geometry.
+        ds = loaders.get("train_dataset")
+        ctx_size = getattr(ds, "context_size", None)
+        crop = ds.records[0].size if ds is not None and getattr(ds, "records", None) else None
+        if not ctx_size or not crop:
+            raise ValueError(
+                "--context-fusion xattn needs the context window and crop sizes from "
+                "the loader (SegmentationCropDataset.context_size / records[].size)."
+            )
+        ratio = float(ctx_size) / float(crop)
+        model_config["context_extent_ratio"] = ratio
+        config["model"]["context_extent_ratio"] = ratio
+        print(f"[stage3] spatial context fusion: {ctx_size}px window over {crop}px "
+              f"crops -> extent ratio {ratio:g}")
 
     if model_kind == "simmim":
         model = build_simmim_segmentation_model(model_config).to(device)

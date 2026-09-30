@@ -811,10 +811,17 @@ class LightweightContextEncoder(nn.Module):
         e.g. 512×512.
 
     Output:
-        context_vector: [B, context_dim]
+        forward():          context_vector [B, context_dim] -- pooled, for FiLM
+        forward_features(): context map [B, 16 * base_channels, H/32, W/32] --
+                            spatially resolved, for SpatialContextCrossAttention
 
     This branch is intentionally small. It should provide scene-level context,
     not do full segmentation.
+
+    `with_head=False` builds no pooling/projection head at all. The spatial
+    fusion path consumes the map directly, and a head that is never called
+    would be dead parameters in the optimizer and the checkpoint -- the same
+    reason use_context=False builds no context branch (tests/test_context_off.py).
     """
 
     def __init__(
@@ -823,6 +830,7 @@ class LightweightContextEncoder(nn.Module):
         base_channels: int = 24,
         depth_per_stage: int = 1,
         context_dim: int = 256,
+        with_head: bool = True,
     ):
         super().__init__()
 
@@ -873,25 +881,36 @@ class LightweightContextEncoder(nn.Module):
             downsample=True,
         )  # 1/32
 
-        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.out_channels = c5
 
-        self.proj = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(c5, context_dim),
-            nn.GELU(),
-            nn.LayerNorm(context_dim),
-        )
+        if with_head:
+            self.pool = nn.AdaptiveAvgPool2d(1)
 
-    def forward(self, context_x: torch.Tensor) -> torch.Tensor:
+            self.proj = nn.Sequential(
+                nn.Flatten(),
+                nn.Linear(c5, context_dim),
+                nn.GELU(),
+                nn.LayerNorm(context_dim),
+            )
+        else:
+            self.pool = None
+            self.proj = None
+
+    def forward_features(self, context_x: torch.Tensor) -> torch.Tensor:
+        """The stride-32 context map, before any pooling."""
         x = self.stem(context_x)
         x = self.stage4(x)
         x = self.stage8(x)
         x = self.stage16(x)
-        x = self.stage32(x)
+        return self.stage32(x)
 
-        context_vector = self.proj(self.pool(x))
-
-        return context_vector
+    def forward(self, context_x: torch.Tensor) -> torch.Tensor:
+        if self.proj is None:
+            raise RuntimeError(
+                "LightweightContextEncoder was built with with_head=False (spatial "
+                "context fusion) and has no pooled head; call forward_features()."
+            )
+        return self.proj(self.pool(self.forward_features(context_x)))
     
 class ContextFiLM2d(nn.Module):
     """
@@ -941,7 +960,103 @@ class ContextFiLM2d(nn.Module):
         shift = shift[:, :, None, None]
 
         return feature * (1.0 + scale) + shift
-    
+
+
+def _token_centres(h: int, w: int, extent: float, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """Centres of an h x w token grid spanning `extent` local-crop widths, with
+    the origin at the local crop's centre. Row-major, matching tensor.flatten(2)."""
+    ys = ((torch.arange(h, device=device, dtype=torch.float32) + 0.5) / h - 0.5) * extent
+    xs = ((torch.arange(w, device=device, dtype=torch.float32) + 0.5) / w - 0.5) * extent
+    yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+    return yy.reshape(-1), xx.reshape(-1)
+
+
+def _sincos_2d(y: torch.Tensor, x: torch.Tensor, dim: int, temperature: float) -> torch.Tensor:
+    """DETR-style 2-D sinusoidal encoding: dim/4 frequencies per axis, sin and
+    cos each. Positions are in local-token units. Returns [N, dim]."""
+    n_freq = dim // 4
+    omega = torch.arange(n_freq, device=y.device, dtype=torch.float32) / max(n_freq - 1, 1)
+    omega = 1.0 / (temperature ** omega)
+    ey = y[:, None] * omega[None, :]
+    ex = x[:, None] * omega[None, :]
+    return torch.cat([ey.sin(), ey.cos(), ex.sin(), ex.cos()], dim=1)
+
+
+class SpatialContextCrossAttention(nn.Module):
+    """Fuse a spatially resolved context grid into the local bottleneck.
+
+    ContextFiLM2d conditions on ONE vector pooled over the whole context
+    window, so it can say "this scene contains ripples" but not "the ripple
+    field lies north of this crop". Here every local bottleneck token attends
+    over the context encoder's stride-32 grid, and both sides carry sinusoidal
+    positions in one shared frame -- origin at the local crop's centre, units of
+    local-token spacing -- so attention knows where each context cell sits
+    relative to each local token.
+
+    The residual output projection is zero-initialised: at step 0 the module is
+    the identity and the model is exactly its no-context counterpart, and the
+    context path opens only as far as the loss asks (as with ContextFiLM2d).
+    That matters in this model family, which has a sharp learning-rate
+    divergence threshold.
+
+    Geometry assumed:
+      * the context window is centred on the local crop and spans
+        `extent_ratio` local-crop widths (context_size / crop_size, 2048/512=4);
+      * the dataset applies the local crop's flips to the context as well
+        (SegmentationCropDataset does), so the shared frame survives
+        augmentation. Spatial jitter (+/-32 px) is NOT applied to the context,
+        so the crop can sit up to 32 px off the frame origin: 1/16 of a local
+        crop width, a quarter of one context cell. Tolerated, not modelled.
+    """
+
+    def __init__(
+        self,
+        local_channels: int,
+        context_channels: int,
+        attn_dim: int,
+        num_heads: int,
+        extent_ratio: float,
+        temperature: float = 100.0,
+    ):
+        super().__init__()
+        if attn_dim % 4 or attn_dim % num_heads:
+            raise ValueError(
+                f"attn_dim={attn_dim} must be divisible by 4 (2-D sin/cos) and by "
+                f"num_heads={num_heads}"
+            )
+        self.extent_ratio = float(extent_ratio)
+        self.attn_dim = attn_dim
+        self.temperature = float(temperature)
+
+        self.q_norm = nn.LayerNorm(local_channels)
+        self.kv_norm = nn.LayerNorm(context_channels)
+        self.q_proj = nn.Linear(local_channels, attn_dim)
+        self.kv_proj = nn.Linear(context_channels, attn_dim)
+        self.attn = nn.MultiheadAttention(attn_dim, num_heads, batch_first=True)
+        self.out_proj = nn.Linear(attn_dim, local_channels)
+
+        # Start as identity.
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, local_feat: torch.Tensor, context_feat: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = local_feat.shape
+        hc, wc = context_feat.shape[-2:]
+
+        q = self.q_proj(self.q_norm(local_feat.flatten(2).transpose(1, 2)))
+        kv = self.kv_proj(self.kv_norm(context_feat.flatten(2).transpose(1, 2)))
+
+        # One frame for both grids, in local-token units: the local grid spans one
+        # crop width (h tokens), the context grid spans extent_ratio crop widths.
+        ly, lx = _token_centres(h, w, 1.0, local_feat.device)
+        cy, cx = _token_centres(hc, wc, self.extent_ratio, local_feat.device)
+        pos_q = _sincos_2d(ly * h, lx * w, self.attn_dim, self.temperature).to(q.dtype)
+        pos_k = _sincos_2d(cy * h, cx * w, self.attn_dim, self.temperature).to(kv.dtype)
+
+        fused, _ = self.attn(q + pos_q, kv + pos_k, kv, need_weights=False)
+        delta = self.out_proj(fused).transpose(1, 2).reshape(b, c, h, w)
+        return local_feat + delta
+
 
 class ContextAwareConvNeXtSwinEncoder(nn.Module):
     """
@@ -953,8 +1068,17 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
     Context branch:
         larger surrounding crop downsampled to 512×512
 
-    The context branch does not segment. It produces a global context vector
-    that modulates selected local feature maps.
+    The context branch does not segment. How it conditions the local branch is
+    chosen by `context_fusion`:
+
+      "film"  (default) -- pooled to one global vector that FiLM-modulates the
+              local x2..x6 maps. Scene-level only: no spatial correspondence.
+      "xattn" -- the context branch's stride-32 GRID is kept, and the local
+              bottleneck cross-attends to it with positions in a shared frame
+              (SpatialContextCrossAttention). No pooled head, no FiLM layers.
+
+    "film" constructs exactly the modules it always has, in the same order, so
+    its initialisation and checkpoints are unchanged by the option existing.
     """
 
     def __init__(
@@ -969,8 +1093,13 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
         window_size: int = 8,
         drop_path: float = 0.0,
         use_context: bool = True,
+        context_fusion: str = "film",
+        context_extent_ratio: float = 4.0,
     ):
         super().__init__()
+
+        if context_fusion not in ("film", "xattn"):
+            raise ValueError(f"context_fusion must be 'film' or 'xattn', got {context_fusion!r}")
 
         self.use_stage32 = use_stage32
         # use_context=False runs this as a single (local) branch: no context
@@ -978,6 +1107,7 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
         # same encoder family serve both arms of a context on/off comparison, so
         # the only difference between them is the context mechanism itself.
         self.use_context = use_context
+        self.context_fusion = context_fusion
 
         self.local_encoder = ConvNeXtSwinEncoder(
             in_channels=in_channels,
@@ -995,6 +1125,7 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
                 base_channels=context_base_channels,
                 depth_per_stage=1,
                 context_dim=context_dim,
+                with_head=(context_fusion == "film"),
             )
             if use_context
             else None
@@ -1006,9 +1137,21 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
         c4 = local_base_channels * 8      # x5: 1/16
         c5 = local_base_channels * 16     # x6: 1/32
 
+        if use_context and context_fusion == "xattn":
+            # Attention width follows context_dim (256 big, 217 small), rounded down
+            # to whole 32-wide heads so the small/big scaling carries over.
+            attn_dim = max(32, context_dim - context_dim % 32)
+            self.context_xattn = SpatialContextCrossAttention(
+                local_channels=c5 if use_stage32 else c4,
+                context_channels=self.context_encoder.out_channels,
+                attn_dim=attn_dim,
+                num_heads=attn_dim // 32,
+                extent_ratio=context_extent_ratio,
+            )
+
         # I would not condition the very earliest x1 feature at first.
         # It may inject context into very local texture too aggressively.
-        if use_context:
+        if use_context and context_fusion == "film":
             self.film_x2 = ContextFiLM2d(c2, context_dim)
             self.film_x3 = ContextFiLM2d(c3, context_dim)
             self.film_x4 = ContextFiLM2d(c3, context_dim)
@@ -1048,6 +1191,15 @@ class ContextAwareConvNeXtSwinEncoder(nn.Module):
                 "but forward() got context_x=None. Pass a context crop, or build "
                 "the encoder with use_context=False."
             )
+
+        if self.context_fusion == "xattn":
+            # Only the bottleneck is conditioned, once -- the skips reach the
+            # decoder as pure local features. Attending at stride 32 keeps the
+            # cost trivial: 16x16 local tokens over a 16x16 context grid.
+            context_map = self.context_encoder.forward_features(context_x)
+            features = list(self.local_encoder(local_x))
+            features[-1] = self.context_xattn(features[-1], context_map)
+            return tuple(features)
 
         context_vector = self.context_encoder(context_x)
 
