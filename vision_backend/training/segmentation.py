@@ -8,8 +8,10 @@ import torch.nn.functional as F
 
 try:
     from vision_backend.model.model import ConvNeXtBlock, LayerNorm2d
+    from vision_backend.model.hetsngp import HetSNGPHead2d
 except ModuleNotFoundError:
     from model.model import ConvNeXtBlock, LayerNorm2d
+    from model.hetsngp import HetSNGPHead2d
 
 
 class ASPP(nn.Module):
@@ -76,6 +78,7 @@ class LightweightSegmentationDecoder(nn.Module):
         dropout: float = 0.0,
         use_aspp: bool = False,
         aspp_rates: Sequence[int] = (6, 12, 18),
+        uncertainty_head: Optional[dict] = None,
     ):
         super().__init__()
 
@@ -118,7 +121,14 @@ class LightweightSegmentationDecoder(nn.Module):
             ConvNeXtBlock(decoder_channels),
             ConvNeXtBlock(decoder_channels),
         )
-        self.head = nn.Conv2d(decoder_channels, num_classes, kernel_size=1)
+        # uncertainty_head (e.g. {"head_type": "hetsngp", ...}) swaps the 1x1 conv
+        # for a HetSNGP output layer (model/hetsngp.py) that returns per-pixel log
+        # predictive probabilities -- valid logits, so the loss, argmax and the
+        # upsampling below are unchanged. None keeps the exact plain classifier.
+        if uncertainty_head:
+            self.head = HetSNGPHead2d(decoder_channels, num_classes, **uncertainty_head)
+        else:
+            self.head = nn.Conv2d(decoder_channels, num_classes, kernel_size=1)
         # Separate attribute, never repurposing `.head` -- model/features.py's
         # pre-forward hook on `decoder.head` (uncertainty/, pc_align/,
         # mars-inference) must keep seeing exactly the DC classifier.
@@ -167,6 +177,11 @@ class LightweightSegmentationDecoder(nn.Module):
         dc_logits = F.interpolate(
             self.head(x), size=output_size, mode="bilinear", align_corners=False
         )
+        if isinstance(self.head, HetSNGPHead2d):
+            # Bilinearly interpolated log-probabilities sum to <= 1 (Jensen), by up
+            # to a few % at class boundaries; renormalize so the output stays an
+            # exact log predictive. softmax/argmax/CE are invariant to this.
+            dc_logits = F.log_softmax(dc_logits.float(), dim=1)
         if not return_ig:
             return dc_logits
         if self.head_ig is None:
@@ -200,6 +215,7 @@ class SingleBranchSegmentationModel(nn.Module):
         decoder_dropout: float = 0.0,
         use_aspp: bool = False,
         aspp_rates: Sequence[int] = (6, 12, 18),
+        uncertainty_head: Optional[dict] = None,
     ):
         super().__init__()
         self.encoder = encoder
@@ -214,6 +230,7 @@ class SingleBranchSegmentationModel(nn.Module):
             dropout=decoder_dropout,
             use_aspp=use_aspp,
             aspp_rates=aspp_rates,
+            uncertainty_head=uncertainty_head,
         )
 
     def forward(self, x: torch.Tensor, *, return_ig: bool = False):
@@ -254,6 +271,7 @@ class ContextAwareSegmentationModel(nn.Module):
         use_aspp: bool = False,
         aspp_rates: Sequence[int] = (6, 12, 18),
         use_context: bool = True,
+        uncertainty_head: Optional[dict] = None,
     ):
         super().__init__()
         self.encoder = encoder
@@ -272,6 +290,7 @@ class ContextAwareSegmentationModel(nn.Module):
             dropout=decoder_dropout,
             use_aspp=use_aspp,
             aspp_rates=aspp_rates,
+            uncertainty_head=uncertainty_head,
         )
         self.bottleneck_index = bottleneck_index
         self.skip8_index = skip8_index

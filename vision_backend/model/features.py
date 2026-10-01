@@ -29,12 +29,19 @@ from contextlib import contextmanager
 import torch
 import torch.nn as nn
 
+from .hetsngp import HetSNGPHead2d
 
-def get_classifier_head(model: nn.Module) -> nn.Conv2d:
-    """Return the model's final 1x1 classifier conv (`model.decoder.head`)."""
+
+def get_classifier_head(model: nn.Module) -> nn.Module:
+    """Return the model's final per-pixel classifier (`model.decoder.head`).
+
+    Either the plain 1x1 conv or a HetSNGP output layer; both take the same
+    [B, F, H, W] decoder features as input, so the pre-classifier hook below
+    captures the same representation for either.
+    """
     decoder = getattr(model, "decoder", None)
     head = getattr(decoder, "head", None) if decoder is not None else None
-    if not isinstance(head, nn.Conv2d):
+    if not isinstance(head, (nn.Conv2d, HetSNGPHead2d)):
         raise ValueError(
             "Model has no `decoder.head` Conv2d classifier -- expected a "
             "SingleBranchSegmentationModel or ContextAwareSegmentationModel "
@@ -46,6 +53,11 @@ def get_classifier_head(model: nn.Module) -> nn.Conv2d:
 def get_classifier_weight_vector(model: nn.Module, class_id: int) -> torch.Tensor:
     """The classifier's weight vector w_k for class `class_id`, shape [F]."""
     head = get_classifier_head(model)
+    if isinstance(head, HetSNGPHead2d):
+        raise ValueError(
+            "HetSNGP head: class weights live in random-feature space, not in the "
+            "decoder feature space, so there is no per-class feature-space vector w_k."
+        )
     if not (0 <= class_id < head.out_channels):
         raise ValueError(f"class_id {class_id} out of range [0, {head.out_channels})")
     return head.weight[class_id, :, 0, 0].detach().clone()

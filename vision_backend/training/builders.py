@@ -90,6 +90,7 @@ def build_context_segmentation_model(model_config: dict[str, Any]) -> ContextAwa
         use_aspp=model_config.get("use_aspp", False),
         aspp_rates=model_config.get("aspp_rates", (6, 12, 18)),
         use_context=bool(model_config.get("use_context", True)),
+        uncertainty_head=model_config.get("uncertainty_head"),
     )
 
 
@@ -123,6 +124,7 @@ def build_simmim_segmentation_model(model_config: dict[str, Any]) -> SingleBranc
         decoder_dropout=model_config.get("decoder_dropout", 0.0),
         use_aspp=model_config.get("use_aspp", False),
         aspp_rates=model_config.get("aspp_rates", (6, 12, 18)),
+        uncertainty_head=model_config.get("uncertainty_head"),
     )
 
 

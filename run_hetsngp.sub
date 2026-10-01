@@ -1,0 +1,27 @@
+# HetSNGP 30-epoch run on the winning pretraining-A/B arm (see run_hetsngp.sh).
+#
+#   INIT=scratch    condor_submit_bid 20 run_hetsngp.sub
+#   INIT=pretrained condor_submit_bid 20 run_hetsngp.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = run_hetsngp.sh
+INIT = $ENV(INIT:NOTSET)
+output = job_outputs/hetsngp/$(INIT).$(Cluster).out
+error  = job_outputs/hetsngp/$(INIT).$(Cluster).err
+log    = job_outputs/hetsngp/$(INIT).$(Cluster).log
+request_cpus   = 8
+request_memory = 16384
+request_gpus   = 1
+min_gpu_mem_mb = 40000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost)
+getenv = True
++JobBatchName = "ai4exomars-hetsngp"
+MaxTime = 129600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "HetSNGP run exited non-zero -- check the .err log"
+queue 1

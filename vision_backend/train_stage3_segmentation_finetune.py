@@ -301,6 +301,25 @@ def parse_args() -> argparse.Namespace:
         "--aspp-rates", nargs="+", type=int, default=(6, 12, 18),
         help="Dilation rates for --use-aspp's parallel branches.",
     )
+    parser.add_argument(
+        "--uncertainty-head", choices=("none", "het", "sngp", "hetsngp"), default="none",
+        help="Replace decoder.head with a HetSNGP output layer (model/hetsngp.py; "
+             "Fortuin et al., TMLR 2022): 'het' = heteroscedastic low-rank logit "
+             "noise (Collier et al. 2021), 'sngp' = random-feature GP output layer "
+             "(Liu et al. 2020), 'hetsngp' = both. GP heads need a post-training "
+             "Laplace fit (scripts/fit_hetsngp_covariance.py) before their "
+             "predictive variance is used.",
+    )
+    parser.add_argument("--het-num-factors", type=int, default=6,
+                        help="Rank R of the heteroscedastic covariance (paper: 6 CIFAR, 15 ImageNet).")
+    parser.add_argument("--het-temperature", type=float, default=1.0,
+                        help="Softmax temperature tau (paper ablation: ~1.0 works well).")
+    parser.add_argument("--het-train-mc-samples", type=int, default=32)
+    parser.add_argument("--het-test-mc-samples", type=int, default=256)
+    parser.add_argument("--gp-num-inducing", type=int, default=1024,
+                        help="Random Fourier feature dimension m.")
+    parser.add_argument("--gp-kernel-scale", type=float, default=1.0,
+                        help="RBF kernel scale (inputs are divided by its square root).")
     parser.add_argument("--window-size", type=int, default=8)
     parser.add_argument("--drop-path", type=float, default=0.0)
     parser.add_argument(
@@ -419,6 +438,15 @@ def build_config(args: argparse.Namespace) -> dict:
             # variant sweeps set it explicitly.
             **({} if args.use_context is None else {"use_context": args.use_context}),
             "context_fusion": args.context_fusion,
+            "uncertainty_head": None if args.uncertainty_head == "none" else {
+                "head_type": args.uncertainty_head,
+                "num_inducing": args.gp_num_inducing,
+                "kernel_scale": args.gp_kernel_scale,
+                "num_factors": args.het_num_factors,
+                "temperature": args.het_temperature,
+                "train_mc_samples": args.het_train_mc_samples,
+                "test_mc_samples": args.het_test_mc_samples,
+            },
         },
         "initialization": {
             "encoder_checkpoint": args.encoder_checkpoint,
@@ -815,6 +843,8 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     print(f"Using device: {device}")
     print(f"Checkpoint path: {checkpoint_path}")
     print(f"Segmentation model params: {count_parameters(base_model):,}")
+    if model_config.get("uncertainty_head"):
+        print(f"[stage3] uncertainty head: {base_model.decoder.head}")
     print(f"Encoder params: {count_parameters(base_model.encoder):,}")
     print(f"Train batches: {len(loaders['train'])}")
     print(f"Val batches:   {len(loaders['val'])}")
