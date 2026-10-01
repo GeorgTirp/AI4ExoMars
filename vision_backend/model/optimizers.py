@@ -431,6 +431,40 @@ class CombinedOptimizer(torch.optim.Optimizer):
             opt.load_state_dict(sub)
 
 
+def _transformer_matrix_names(model: torch.nn.Module) -> set[str]:
+    """Parameter names of the 2-D weights inside transformer blocks.
+
+    Swin blocks and the HybridEncoder's global-attention block: their qkv,
+    output-projection and MLP matrices. Matched by module type, not by name, so
+    the ConvNeXt blocks' pointwise Linear layers and the decoder stay out.
+    Names are as `model.named_parameters()` reports them (incl. `_orig_mod.`).
+    """
+    from .blocks_v2 import GlobalAttentionBlock
+    from .model import SwinTransformerBlock
+
+    names: set[str] = set()
+    for mod_name, mod in model.named_modules():
+        if isinstance(mod, (SwinTransformerBlock, GlobalAttentionBlock)):
+            for pn, p in mod.named_parameters():
+                if p.ndim == 2:
+                    names.add(f"{mod_name}.{pn}" if mod_name else pn)
+    return names
+
+
+def muon_adam_matched_scale(shape: torch.Size) -> float:
+    """Factor c with lr_SingleDeviceMuon = c * lr_AdamW for one weight matrix.
+
+    Liu et al. 2025, "Muon is Scalable for LLM Training" (Moonlight): scaling
+    the orthogonalized update to 0.2 * sqrt(max(A, B)) matches AdamW's typical
+    update RMS, so AdamW's tuned learning rate and decoupled weight decay carry
+    over unchanged. KellerJordan's SingleDeviceMuon already multiplies the
+    update by sqrt(max(1, A / B)) (A = rows = shape[0]), hence
+        c = 0.2 * sqrt(max(A, B)) / sqrt(max(1, A / B)).
+    """
+    a, b = int(shape[0]), int(math.prod(shape[1:]))
+    return 0.2 * math.sqrt(max(a, b)) / math.sqrt(max(1.0, a / b))
+
+
 def build_routed_muon_nadam_optimizer(
     model: torch.nn.Module,
     *,
@@ -442,6 +476,7 @@ def build_routed_muon_nadam_optimizer(
     nadam_weight_decay: float = 0.0,
     require_muon: bool = True,
     muon_scope: str = "matrix",
+    muon_lr_mode: str = "absolute",
     llrd: float = 1.0,
 ) -> CombinedOptimizer:
     """Muon on weight matrices, NAdam on everything else.
@@ -462,6 +497,16 @@ def build_routed_muon_nadam_optimizer(
       ``[C,49]`` and orthogonalisation forces mutually-orthogonal filters across
       channels that are independent by construction -- a constraint with no
       meaning for depthwise convolution, and outside Muon's validated domain.
+    - ``"transformer"``: only the 2-D matrices inside Swin / global-attention
+      blocks; ConvNeXt pointwise layers and the decoder stay on NAdam.
+
+    ``muon_lr_mode="match_adam"`` reads muon_lr / muon_weight_decay as
+    AdamW-equivalent values and converts them per matrix (see
+    `muon_adam_matched_scale`), so a tuned NAdamW LR / WD transfers and only the
+    update direction differs. ``"absolute"`` passes muon_lr to Muon as is.
+
+    The NAdam half is NAdamW (decoupled decay) with norms / biases / rel-pos
+    tables undecayed -- identical to `create_optimizer`'s single-optimizer path.
 
     Muon and NAdam are independent optimizers with their own LR and momentum,
     wrapped in a CombinedOptimizer so the training loop is unchanged.
@@ -471,8 +516,11 @@ def build_routed_muon_nadam_optimizer(
     groups above, only multiplies that bucket's own base LR by a depth-
     dependent factor. ``1.0`` (default) reproduces today's LRs exactly.
     """
-    if muon_scope not in ("matrix", "all"):
-        raise ValueError(f"muon_scope must be 'matrix' or 'all', got {muon_scope!r}")
+    if muon_scope not in ("matrix", "all", "transformer"):
+        raise ValueError(f"muon_scope must be 'matrix', 'all' or 'transformer', got {muon_scope!r}")
+    if muon_lr_mode not in ("absolute", "match_adam"):
+        raise ValueError(f"muon_lr_mode must be 'absolute' or 'match_adam', got {muon_lr_mode!r}")
+    transformer_names = _transformer_matrix_names(model) if muon_scope == "transformer" else set()
 
     muon_named: list[tuple[str, torch.nn.Parameter]] = []
     aux_decay_named: list[tuple[str, torch.nn.Parameter]] = []
@@ -482,29 +530,45 @@ def build_routed_muon_nadam_optimizer(
             continue
         if param.ndim <= 1 or any(frag in name for frag in _NO_DECAY_NAME_FRAGMENTS):
             aux_no_decay_named.append((name, param))
-        elif muon_scope == "all" or param.ndim == 2:
+        elif (muon_scope == "all"
+              or (muon_scope == "matrix" and param.ndim == 2)
+              or (muon_scope == "transformer" and name in transformer_names)):
             muon_named.append((name, param))
         else:
-            # >=3-D (conv) weights: not Muon's domain, but still decayed.
+            # weights outside Muon's scope (convs; other 2-D under "transformer"):
+            # NAdam, still decayed.
             aux_decay_named.append((name, param))
 
+    # Norms / biases / rel-pos tables never decay; NAdam's own weights decay at
+    # nadam_weight_decay, decoupled (NAdamW) -- exactly as create_optimizer does.
     aux_groups = (
-        _group_params_by_llrd_rank(aux_no_decay_named, nadam_lr, llrd, extra={"weight_decay": nadam_weight_decay})
-        + _group_params_by_llrd_rank(aux_decay_named, nadam_lr, llrd, extra={"weight_decay": muon_weight_decay})
+        _group_params_by_llrd_rank(aux_no_decay_named, nadam_lr, llrd, extra={"weight_decay": 0.0})
+        + _group_params_by_llrd_rank(aux_decay_named, nadam_lr, llrd, extra={"weight_decay": nadam_weight_decay})
     )
     print(f"[optimizers] muon_scope={muon_scope}: Muon {len(muon_named)} tensors, "
           f"NAdam {len(aux_decay_named)} conv/>=3-D (decayed) + {len(aux_no_decay_named)} 1-D/excluded. "
           f"llrd={llrd}")
     aux = torch.optim.NAdam(
-        aux_groups, lr=nadam_lr, betas=nadam_betas, weight_decay=nadam_weight_decay
+        aux_groups, lr=nadam_lr, betas=nadam_betas, weight_decay=nadam_weight_decay,
+        decoupled_weight_decay=True,
     )
 
-    muon_groups = _group_params_by_llrd_rank(muon_named, muon_lr, llrd)
+    if muon_lr_mode == "match_adam":
+        # muon_lr / muon_weight_decay are AdamW-equivalent values: one group per
+        # matrix with lr * c and wd / c, which keeps the per-step decay lr * wd.
+        muon_groups = []
+        for name, param in muon_named:
+            rank_lr = _group_params_by_llrd_rank([(name, param)], muon_lr, llrd)[0]["lr"]
+            c = muon_adam_matched_scale(param.shape)
+            muon_groups.append({"params": [param], "lr": rank_lr * c,
+                                "weight_decay": muon_weight_decay / c})
+    else:
+        muon_groups = _group_params_by_llrd_rank(muon_named, muon_lr, llrd)
 
     if _HAS_MUON:
         print("[optimizers] Routed: Muon on 2-D weight matrices "
-              f"(lr={muon_lr}, momentum={muon_momentum}), NAdam on the rest "
-              f"(lr={nadam_lr}, betas={nadam_betas}).")
+              f"(lr={muon_lr} [{muon_lr_mode}], wd={muon_weight_decay}, momentum={muon_momentum}), "
+              f"NAdamW on the rest (lr={nadam_lr}, wd={nadam_weight_decay}, betas={nadam_betas}).")
         muon = Muon(
             muon_groups, lr=muon_lr, momentum=muon_momentum,
             weight_decay=muon_weight_decay,
@@ -526,7 +590,8 @@ def build_routed_muon_nadam_optimizer(
           "too (plumbing only, do not train seriously like this).")
     muon_groups_fallback = _group_params_by_llrd_rank(muon_named, nadam_lr, llrd)
     muon_fallback = torch.optim.NAdam(
-        muon_groups_fallback, lr=nadam_lr, betas=nadam_betas, weight_decay=muon_weight_decay
+        muon_groups_fallback, lr=nadam_lr, betas=nadam_betas, weight_decay=muon_weight_decay,
+        decoupled_weight_decay=True,
     )
     return CombinedOptimizer([muon_fallback, aux])
 

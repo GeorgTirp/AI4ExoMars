@@ -87,10 +87,13 @@ def test_create_optimizer_llrd_less_than_one_every_param_in_exactly_one_group():
 def test_create_optimizer_llrd_less_than_one_lrs_monotonically_nondecreasing():
     model = _model()
     optimizer = create_optimizer(model, lr=1e-3, weight_decay=0.01, use_muon=False, llrd=0.8)
-    lrs = [g["lr"] for g in optimizer.param_groups]
-    assert lrs == sorted(lrs)
-    assert lrs[0] < lrs[-1]  # actually discounts something
-    assert lrs[-1] == pytest.approx(1e-3)  # decoder/head group keeps full LR
+    # Groups come as [decayed by depth] + [undecayed by depth] (norms/biases are
+    # split out of weight decay), so LLRD's ordering holds within each bucket.
+    for wd in (0.01, 0.0):
+        lrs = [g["lr"] for g in optimizer.param_groups if g["weight_decay"] == wd]
+        assert lrs == sorted(lrs)
+        assert lrs[0] < lrs[-1]  # actually discounts something
+        assert lrs[-1] == pytest.approx(1e-3)  # decoder/head group keeps full LR
 
 
 # --------------------------------------------------------------------------
@@ -146,3 +149,58 @@ def test_routed_optimizer_fallback_path_uses_nadam_lr_not_muon_lr(monkeypatch):
     muon_fallback_opt, nadam_opt = optimizer.optimizers
     for group in muon_fallback_opt.param_groups:
         assert group["lr"] == pytest.approx(1e-4)  # nadam_lr, NOT 10.0
+
+
+# --------------------------------------------------------------------------
+# Muon on transformer matrices only, Adam-matched LR, NAdamW for the rest
+# --------------------------------------------------------------------------
+def _simmim_model():
+    from vision_backend.training.builders import build_simmim_segmentation_model
+
+    return build_simmim_segmentation_model({
+        "model_kind": "simmim", "in_channels": 1, "global_base_grid": 4,
+        "window_size": 8, "decoder_channels": 16, "num_classes": 3,
+    })
+
+
+def _routed_transformer(model):
+    return build_routed_muon_nadam_optimizer(
+        model, muon_lr=1e-4, muon_weight_decay=5e-5, nadam_lr=1e-4, nadam_weight_decay=5e-5,
+        muon_scope="transformer", muon_lr_mode="match_adam",
+    )
+
+
+def test_transformer_scope_routes_exactly_the_attention_and_mlp_matrices():
+    model = _simmim_model()
+    muon_opt, _ = _routed_transformer(model).optimizers
+    muon_ids = {id(p) for g in muon_opt.param_groups for p in g["params"]}
+    expected = {
+        id(p) for n, p in model.named_parameters()
+        if (".s3." in n or ".s4." in n) and p.ndim == 2 and "relative_position" not in n
+    }
+    assert muon_ids == expected and len(expected) == 32
+
+
+def test_match_adam_uses_moonlight_scale_and_keeps_the_per_step_decay():
+    import math
+
+    from vision_backend.model.optimizers import muon_adam_matched_scale
+
+    assert muon_adam_matched_scale(torch.Size([384, 384])) == pytest.approx(0.2 * math.sqrt(384))
+    # SingleDeviceMuon already scales tall matrices by sqrt(A/B) = 2 here
+    assert muon_adam_matched_scale(torch.Size([1536, 384])) == pytest.approx(0.2 * math.sqrt(1536) / 2)
+    muon_opt, _ = _routed_transformer(_simmim_model()).optimizers
+    for g in muon_opt.param_groups:
+        c = muon_adam_matched_scale(g["params"][0].shape)
+        assert g["lr"] == pytest.approx(1e-4 * c)
+        assert g["lr"] * g["weight_decay"] == pytest.approx(1e-4 * 5e-5)
+
+
+def test_routed_nadam_is_decoupled_and_never_decays_norms_or_biases():
+    _, nadam_opt = _routed_transformer(_simmim_model()).optimizers
+    assert nadam_opt.defaults["decoupled_weight_decay"] is True
+    for g in nadam_opt.param_groups:
+        if any(p.ndim <= 1 for p in g["params"]):
+            assert g["weight_decay"] == 0.0
+        else:
+            assert g["weight_decay"] == pytest.approx(5e-5)

@@ -67,7 +67,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--muon-lr", type=float, default=2e-2)
     parser.add_argument("--muon-momentum", type=float, default=0.95)
     parser.add_argument("--muon-weight-decay", type=float, default=1e-2)
-    parser.add_argument("--nadam-lr", type=float, default=3e-4)
+    parser.add_argument("--nadam-lr", type=float, default=None,
+                        help="NAdamW LR for the non-Muon params (default: --learning-rate).")
+    parser.add_argument("--nadam-weight-decay", type=float, default=None,
+                        help="Decoupled WD for NAdamW's weights (default: --weight-decay).")
+    parser.add_argument(
+        "--muon-lr-mode", choices=("absolute", "match_adam"), default="absolute",
+        help="absolute: --muon-lr is SingleDeviceMuon's own LR (default 0.02). "
+             "match_adam: --muon-lr / --muon-weight-decay are AdamW-equivalent "
+             "values, converted per matrix by Moonlight's 0.2*sqrt(max(A,B)) "
+             "update-RMS matching (Liu et al. 2025).",
+    )
     parser.add_argument("--nadam-beta1", type=float, default=0.9)
     parser.add_argument("--nadam-beta2", type=float, default=0.999)
     parser.add_argument("--num-classes", type=int, default=None)
@@ -339,8 +349,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-stage32", action="store_true")
     parser.add_argument("--use-muon", action="store_true")
     parser.add_argument(
-        "--muon-scope", choices=("matrix", "all"), default="matrix",
-        help="Which weights Muon optimizes. 'matrix' (default) = genuinely 2-D "
+        "--muon-scope", choices=("matrix", "all", "transformer"), default="matrix",
+        help="Which weights Muon optimizes. 'transformer' = only the 2-D "
+             "qkv/proj/MLP matrices inside Swin and global-attention blocks. "
+             "'matrix' (default) = every genuinely 2-D weight (also ConvNeXt "
+             "pointwise layers and the decoder), "
              "attention/MLP weights only, the regime Muon is designed for; "
              "convolutions go to NAdam (weight decay preserved). 'all' = every "
              ">=2-D weight, the previous behaviour, which on this hybrid "
@@ -465,6 +478,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "warmup_fraction": args.warmup_fraction,
             "use_muon": args.use_muon,
             "muon_scope": args.muon_scope,
+            "muon_lr_mode": args.muon_lr_mode,
             "grad_clip_norm": args.grad_clip_norm,
             "allow_nonfinite_loss": args.allow_nonfinite_loss,
             "llrd": args.llrd,
@@ -472,7 +486,9 @@ def build_config(args: argparse.Namespace) -> dict:
             "muon_lr": args.muon_lr,
             "muon_momentum": args.muon_momentum,
             "muon_weight_decay": args.muon_weight_decay,
-            "nadam_lr": args.nadam_lr,
+            "nadam_lr": args.learning_rate if args.nadam_lr is None else args.nadam_lr,
+            "nadam_weight_decay": (args.weight_decay if args.nadam_weight_decay is None
+                                   else args.nadam_weight_decay),
             "nadam_beta1": args.nadam_beta1,
             "nadam_beta2": args.nadam_beta2,
         },
@@ -798,7 +814,9 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             muon_momentum=float(optimization["muon_momentum"]),
             muon_weight_decay=float(optimization["muon_weight_decay"]),
             muon_scope=str(optimization.get("muon_scope", "matrix")),
+            muon_lr_mode=str(optimization.get("muon_lr_mode", "absolute")),
             nadam_lr=float(optimization["nadam_lr"]),
+            nadam_weight_decay=float(optimization.get("nadam_weight_decay", 0.0)),
             nadam_betas=(float(optimization["nadam_beta1"]), float(optimization["nadam_beta2"])),
             llrd=llrd,
         )

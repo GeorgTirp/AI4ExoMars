@@ -1,0 +1,39 @@
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+
+executable = run_muon.sh
+
+# ARM (pretrained | scratch) comes from the submitting shell. $ENV() because
+# condor_submit expands $(...) itself, before getenv reaches the job.
+ARM = $ENV(ARM:scratch)
+
+output = job_outputs/muon/$(ARM).$(Cluster).out
+error  = job_outputs/muon/$(ARM).$(Cluster).err
+log    = job_outputs/muon/$(ARM).$(Cluster).log
+
+request_cpus   = 8
+request_memory = 12288
+request_gpus   = 1
+
+# Same GPU model as the architecture comparison, so step times are comparable,
+# and the cheapest tier (MinRunningPrice 15). g155 excluded: its GPU slot fails
+# at CUDA init. LastRemoteHost: never retry on the node that just failed.
+min_gpu_mem_mb = 40000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost)
+
+getenv = True
+
++JobBatchName = "ai4exomars-muon"
+
+# 30 epochs at ~17 min/epoch is ~8.5 h; 36 h is a hang guard, not a budget.
+MaxTime = 129600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Muon run exited non-zero -- check the .err log"
+
+queue 1
