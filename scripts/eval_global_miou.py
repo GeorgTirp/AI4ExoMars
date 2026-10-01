@@ -56,6 +56,42 @@ def class_name(idx: int) -> str:
     return CLASS_NAMES[idx] if idx < len(CLASS_NAMES) else f"class_{idx}"
 
 
+def trained_crop_size(config: dict) -> int | None:
+    """Crop size the checkpoint was trained on, read from its training manifest.
+
+    The checkpoint config records the loader config it trained with, not the
+    crop size, so follow loader config -> manifest_path -> first row's `size`.
+    None when any link is missing (the checkpoint is then evaluated untiled).
+    """
+    import csv
+
+    try:
+        loader_cfg = json.loads(Path(config["data"]["loader_config_path"]).read_text())
+        with open(loader_cfg["manifest_path"], newline="") as fh:
+            return int(next(csv.DictReader(fh))["size"])
+    except (KeyError, OSError, StopIteration, ValueError, TypeError):
+        return None
+
+
+def tiled_forward(model, x, tile: int):
+    """Run `model` on non-overlapping tile x tile windows of `x` and stitch the logits.
+
+    Lets a model trained on 512 crops be scored on exactly the pixels of a
+    1024-crop val set while still seeing 512 inputs, as it did in training --
+    the only way to compare input window sizes on identical pixels. The tiles
+    do not overlap, so each one is precisely a 512 crop the model could have
+    been validated on; overlap-averaging would hand it extra context instead.
+    """
+    b, c, h, w = x.shape
+    if h % tile or w % tile:
+        raise ValueError(f"input {h}x{w} is not a multiple of tile {tile}")
+    nh, nw = h // tile, w // tile
+    tiles = x.reshape(b, c, nh, tile, nw, tile).permute(0, 2, 4, 1, 3, 5).reshape(b * nh * nw, c, tile, tile)
+    out = model(tiles)
+    k = out.shape[1]
+    return out.reshape(b, nh, nw, k, tile, tile).permute(0, 3, 1, 4, 2, 5).reshape(b, k, h, w)
+
+
 def evaluate_checkpoint(
     ckpt_path: Path,
     *,
@@ -67,10 +103,14 @@ def evaluate_checkpoint(
     load_segmentation_model_from_checkpoint,
     parse_segmentation_batch,
     resolve_path,
+    tile_mode: str = "off",
 ) -> dict:
     model, model_kind, num_classes, config = load_segmentation_model_from_checkpoint(
         ckpt_path, device=str(device)
     )
+    tile = trained_crop_size(config) if tile_mode == "auto" else None
+    if tile_mode == "auto" and tile is None:
+        print(f"  [tile] {ckpt_path.name}: training crop size unknown -- evaluating untiled")
 
     # The value the training run itself recorded at the epoch this checkpoint
     # was saved. Read it from the checkpoint, NOT from config["output"]
@@ -101,6 +141,7 @@ def evaluate_checkpoint(
     # decides whether a weak class needs a different loss, more capacity, or
     # better labels.
     conf = torch.zeros(num_classes, num_classes, dtype=torch.int64, device=device)
+    tiled = False
 
     with torch.no_grad():
         for batch in dataloader:
@@ -109,7 +150,15 @@ def evaluate_checkpoint(
             target = target.to(device, non_blocking=True).long()
             context_tensor = context.to(device, non_blocking=True).float() if context is not None else None
 
-            logits = model(local, context_tensor) if context_tensor is not None else model(local)
+            if tile is not None and local.shape[-1] > tile:
+                if context_tensor is not None:
+                    raise ValueError(f"{ckpt_path.name}: tiling a context model is not supported")
+                logits = tiled_forward(model, local, tile)
+                tiled = True
+            elif context_tensor is not None:
+                logits = model(local, context_tensor)
+            else:
+                logits = model(local)
             preds = logits.argmax(dim=1)
             in_range = (target != ignore_index) & (target >= 0) & (target < num_classes)
             t = target[in_range].reshape(-1)
@@ -133,6 +182,7 @@ def evaluate_checkpoint(
 
     return {
         "ckpt_path": ckpt_path,
+        "tile": tile if tiled else None,
         "num_classes": num_classes,
         "reported_val_miou": reported_val_miou,
         "global_miou": global_miou,
@@ -151,7 +201,9 @@ def print_checkpoint_report(result: dict, *, split: str) -> None:
     present = result["present"]
     per_class_iou = result["per_class_iou"]
 
-    print(f"=== {ckpt_path.name} ===")
+    print(f"=== {ckpt_path.parent.name}/{ckpt_path.name} ===")
+    if result.get("tile"):
+        print(f"  tiled: non-overlapping {result['tile']}x{result['tile']} windows (its training crop size)")
     if result["reported_val_miou"] is not None:
         print(f"  val_miou recorded by the run at this checkpoint's epoch: {result['reported_val_miou']:.4f}")
     print(
@@ -266,10 +318,25 @@ def main() -> None:
              "evaluate a checkpoint whose model was built with use_context=True; "
              "without it the loader falls back to a slow live per-item read.",
     )
+    parser.add_argument(
+        "--crop-cache-dir", default=None,
+        help="Padded crop cache matching --loader-config-path's manifest (as passed\n"
+             "to training). Same pixels as the live raster read, minus the per-crop\n"
+             "GeoTIFF decompression.",
+    )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--ignore-index", type=int, default=255)
     parser.add_argument("--split", choices=("val", "train"), default="val")
+    parser.add_argument(
+        "--tile", choices=("off", "auto"), default="off",
+        help="auto: a checkpoint trained on smaller crops than the loader serves\n"
+             "(e.g. a 512 model on the 1024 val set) is run on non-overlapping\n"
+             "windows of its training crop size and the logits stitched, so models\n"
+             "of different input sizes are scored on identical pixels.",
+    )
+    parser.add_argument("--json-out", default=None,
+                        help="Also write per-checkpoint mIoU and per-class IoU here (JSON).")
     args = parser.parse_args()
 
     import torch
@@ -303,6 +370,8 @@ def main() -> None:
             "augment": False,
         }
     )
+    if args.crop_cache_dir:
+        loader_kwargs["cache_dir"] = args.crop_cache_dir
     num_classes_from_config = loader_kwargs.get("num_classes")
 
     # A context-branch model needs the loader to SERVE context crops. Building
@@ -347,6 +416,7 @@ def main() -> None:
             load_segmentation_model_from_checkpoint=load_segmentation_model_from_checkpoint,
             parse_segmentation_batch=parse_segmentation_batch,
             resolve_path=resolve_path,
+            tile_mode=args.tile,
         )
 
     results_by_path: dict[str, dict] = {}
@@ -366,6 +436,25 @@ def main() -> None:
         print_confusions(result)
         if baseline_result is not None:
             print_delta_table(baseline_result, result)
+
+    if args.json_out:
+        rows = [
+            {
+                "checkpoint": path,
+                "tile": r["tile"],
+                "reported_val_miou": r["reported_val_miou"],
+                "global_miou": r["global_miou"],
+                "global_pixel_acc": r["global_pixel_acc"],
+                "per_class_iou": {
+                    class_name(c): float(r["per_class_iou"][c])
+                    for c in range(r["num_classes"]) if bool(r["present"][c])
+                },
+            }
+            for path, r in results_by_path.items()
+        ]
+        Path(args.json_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.json_out).write_text(json.dumps(rows, indent=1))
+        print(f"wrote {args.json_out}")
 
 
 if __name__ == "__main__":

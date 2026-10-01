@@ -743,7 +743,11 @@ def train_stage(config: dict, wandb_run=None) -> dict:
     if bool(runtime.get("compile", False)):
         # Compile after the encoder checkpoint load and after any memory-format
         # change, so the compiled graph reflects the final module.
-        model = torch.compile(model)
+        # dynamic=False: crops are fixed-size, and torch 2.5.1's inductor cannot
+        # build the Swin window-attention reduction once a frame that has seen a
+        # second shape is recompiled with symbolic H/W ("Failed to find static
+        # RBLOCK"). Other shapes (eval batch, throughput probe) get static recompiles.
+        model = torch.compile(model, dynamic=False)
         print("[stage3] torch.compile enabled (first step pays the compile cost).")
 
     # F5: EMA, built from base_model (not the possibly torch.compile'd `model`)

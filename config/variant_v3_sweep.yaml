@@ -54,10 +54,16 @@ parameters:
   # 11, across all four variants, with --grad-clip-norm 1.0 active). Both
   # trials at <= 1.8e-4 ran to completion. The threshold is sharp, so the old
   # range spent ~70% of its probability mass on runs that could not finish.
+  # 2026-10-01: range moved DOWN, 5e-5..2e-4 -> 1.5e-5..1.2e-4, on the 17
+  # completed 30-epoch trials (v0-v3, v3x, v2@1024). In 5 of 6 variants the
+  # lowest-LR trial was best or within 0.002 of best, and above ~1.2e-4 every
+  # variant got worse (v2@1024: 6.2e-5 -> 0.178, 1.45e-4 -> 0.168, 1.68e-4 ->
+  # 0.160). The optimum sits at or below the old floor, so the new floor is ~3x
+  # under the lowest LR tried. Identical across v0-v3.
   optimization.learning_rate:
     distribution: log_uniform_values
-    min: 5.0e-5
-    max: 2.0e-4
+    min: 1.5e-5
+    max: 1.2e-4
 
   # Narrowed from 1e-4 .. 1e-1 on 2026-09-28. Weight decay is what destroyed
   # the 2026-08-27 runs: create_optimizer applied it to LayerNorm/bias/layer-

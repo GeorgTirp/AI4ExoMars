@@ -1,0 +1,32 @@
+# Same-pixel comparison of input window sizes: every checkpoint is scored on the
+# 377 crops of the 1024 val set. 512-trained models (v2, v0, SimMIM hybrid) run
+# on the four non-overlapping 512 quadrants of each crop (--tile auto) and the
+# v2@1024 models on the whole crop, so all are measured on identical pixels.
+# None of these pixels lies in any 512 training crop (95% are 512-val, 5% buffer).
+#
+# Inference only, so 24 GB suffices: lets it run on the Quadro RTX 6000 nodes
+# as well as the A100-40GB ones.
+#
+#   condor_submit_bid 20 eval_samepix.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = eval_miou.sh
+DER1K = /fast/gtirpitz/ai4exomars/derived_1024
+arguments  = checkpoints/variant_v2_1024/best_30ep_xwqe9654.pt checkpoints/variant_v2_1024/best_30ep_hoq6txaz.pt checkpoints/variant_v2_1024/best_30ep_3654znp4.pt checkpoints/variant_v2/best_30ep_sm95x8oj.pt checkpoints/variant_v2/best_30ep_e99i6eid.pt checkpoints/variant_v2/best_30ep_p7bdro9r.pt checkpoints/variant_v0/best_30ep_20vywiz8.pt checkpoints/variant_v0/best_30ep_g9wwdrzm.pt checkpoints/variant_v0/best_30ep_xgj106xc.pt checkpoints/pretrain_ab_scratch/best_30ep.pt --tile auto --batch-size 2 --loader-config-path $(DER1K)/seg_loader_DC_1024.json --crop-cache-dir $(DER1K)/seg_crop_cache_1024 --json-out results/eval/samepix_1024.json
+output = job_outputs/eval/samepix.$(Cluster).out
+error  = job_outputs/eval/samepix.$(Cluster).err
+log    = job_outputs/eval/samepix.$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+requirements   = (TARGET.CUDAGlobalMemoryMb >= 20000) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost)
+getenv = True
++JobBatchName = "ai4exomars-eval-samepix"
+MaxTime = 3600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Same-pixel eval exceeded MaxTime -- it should take minutes"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Same-pixel eval exited non-zero -- check the .err log"
+queue 1
