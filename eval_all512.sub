@@ -1,0 +1,27 @@
+# Per-class global mIoU of every completed 30-epoch model on the same 512 val
+# set (1,496 crops) -- the basis for the architecture-trend analysis. Context
+# models (v1, v3, v3x) get their context crops from the context cache.
+# Submit only after the pretrained A/B arm has finished (its final checkpoint).
+#
+#   condor_submit_bid 20 eval_all512.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = eval_miou.sh
+arguments  = checkpoints/variant_v0/best_30ep_20vywiz8.pt checkpoints/variant_v0/best_30ep_g9wwdrzm.pt checkpoints/variant_v0/best_30ep_xgj106xc.pt checkpoints/variant_v1/best_30ep_3v89dfdv.pt checkpoints/variant_v1/best_30ep_xed7offt.pt checkpoints/variant_v2/best_30ep_e99i6eid.pt checkpoints/variant_v2/best_30ep_p7bdro9r.pt checkpoints/variant_v2/best_30ep_sm95x8oj.pt checkpoints/variant_v3/best_30ep_7uakaz56.pt checkpoints/variant_v3/best_30ep_bvoh8joy.pt checkpoints/variant_v3/best_30ep_xqi830h7.pt checkpoints/variant_v3_xattn/best_30ep_0m8ggiy6.pt checkpoints/variant_v3_xattn/best_30ep_2htv2bdn.pt checkpoints/variant_v3_xattn/best_30ep_v0tz5idr.pt checkpoints/pretrain_ab_scratch/best_30ep.pt checkpoints/pretrain_ab_pretrained/best_30ep.pt checkpoints/muon_transformer_scratch/best_30ep.pt --batch-size 4 --loader-config-path data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_loader_DC_full.json --crop-cache-dir data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_crop_cache_full --context-cache-dir data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_context_cache_full --json-out results/eval/all512_30ep.json
+output = job_outputs/eval/all512.$(Cluster).out
+error  = job_outputs/eval/all512.$(Cluster).err
+log    = job_outputs/eval/all512.$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+requirements   = (TARGET.CUDAGlobalMemoryMb >= 20000) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost)
+getenv = True
++JobBatchName = "ai4exomars-eval-all512"
+MaxTime = 5400
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Unified eval exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Unified eval exited non-zero -- check the .err log"
+queue 1
