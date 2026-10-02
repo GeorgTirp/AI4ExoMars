@@ -25,9 +25,14 @@ metric:
   name: val/miou
   goal: maximize
 
-# Ceiling on attempts (failed and early-stopped runs count). Agents are added in
-# waves; raise only by editing the sweep, never by starting a new one.
-run_cap: 24
+# Safety ceiling only -- NOT the budget. The budget is set by how many agents
+# are submitted (NTRIALS x SWEEP_COUNT); this cap must never be what ends the
+# search. Failed and early-stopped runs count against it.
+# wandb cannot reconfigure a sweep once it has started ("cannot reconfigure
+# sweep which has already started"), so the pilot sweep jjo7a5f6 keeps the
+# run_cap 24 it was created with; 200 applies to the full tuning sweep created
+# from this file after the pilot + HetSNGP results.
+run_cap: 200
 
 # Tuning, not a fair architecture comparison: stop clearly weak trials early.
 # val/miou is logged once per epoch (step = epoch), so brackets fall at epochs
