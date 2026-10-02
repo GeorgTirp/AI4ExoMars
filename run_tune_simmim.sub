@@ -1,0 +1,28 @@
+# Sweep agents for the SimMIM + Muon + Lovász + drop-path tuning sweep
+# (config/tune_simmim_muon_sweep.yaml, wandb project ai4exomars_tune_simmim).
+# One queued job = one agent = SWEEP_COUNT trials (default 1, 16 epochs each).
+#
+#   SWEEP_ID=<entity/project/id> NTRIALS=4 condor_submit_bid 20 run_tune_simmim.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = run_tune_simmim.sh
+output = job_outputs/tune_simmim/agent.$(Cluster).$(Process).out
+error  = job_outputs/tune_simmim/agent.$(Cluster).$(Process).err
+log    = job_outputs/tune_simmim/agent.$(Cluster).log
+request_cpus   = 8
+request_memory = 12288
+request_gpus   = 1
+min_gpu_mem_mb = 40000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet")
+getenv = True
++JobBatchName = "ai4exomars-tune-simmim"
+MaxTime = 129600
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Tuning agent exited non-zero -- check the .err log"
+NTRIALS = $ENV(NTRIALS:1)
+queue $(NTRIALS)

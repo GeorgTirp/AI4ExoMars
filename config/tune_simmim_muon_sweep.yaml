@@ -1,0 +1,76 @@
+# Wandb sweep -- tuning the production candidate: SimMIM HybridEncoder (scratch)
+# + Muon on the transformer matrices + Lovász-softmax + stochastic depth, 16 epochs.
+#
+# Why this model (EXPERIMENT_LOG.md): the HybridEncoder is the only design
+# change clearly above noise (+0.023 mIoU over ConvNeXt-Swin); SimMIM
+# pretraining did not help; Muon reached the 30-epoch NAdamW quality in ~half
+# the epochs and peaked at epoch 16 (0.2032) before overfitting -- hence the
+# 16-epoch schedule and drop-path. Lovász targets the per-class IoU that the
+# metric averages (Textured bedrock, 17.5 % of pixels, sits at IoU ~0.09 with
+# the minimum class weight).
+#
+# Fixed (run_tune_simmim.sh): scratch init, --use-muon --muon-scope transformer
+# --muon-lr-mode match_adam (Moonlight RMS matching: muon_lr / muon_weight_decay
+# are AdamW-equivalent values), momentum 0.95, bf16, compile, batch 4, EMA
+# 0.9999, decoder dropout 0.1, IG aux 0.4, class-weighted CE, warmup 10 %,
+# seed 42 (every trial sees the same data order -- differences are the params).
+#
+# Create:   wandb sweep --project ai4exomars_tune_simmim config/tune_simmim_muon_sweep.yaml
+# Agents:   SWEEP_ID=<id> NTRIALS=4 condor_submit_bid 20 run_tune_simmim.sub
+
+program: vision_backend/train_stage3_segmentation_finetune.py
+method: bayes
+
+metric:
+  name: val/miou
+  goal: maximize
+
+# Ceiling on attempts (failed and early-stopped runs count). Agents are added in
+# waves; raise only by editing the sweep, never by starting a new one.
+run_cap: 24
+
+# Tuning, not a fair architecture comparison: stop clearly weak trials early.
+# val/miou is logged once per epoch (step = epoch), so brackets fall at epochs
+# 5 and 10. min_iter 5 (not lower) because Muon's fast early rise would
+# otherwise favour aggressive LRs that overfit later.
+early_terminate:
+  type: hyperband
+  min_iter: 5
+  eta: 2
+
+parameters:
+  # AdamW-equivalent Muon LR (converted per matrix to 0.2*sqrt(max(A,B)) RMS).
+  # The 30-epoch run used 1.107e-4; Muon is commonly stable at higher LR than
+  # AdamW, so the range reaches 4.5x above it.
+  optimization.muon_lr:
+    distribution: log_uniform_values
+    min: 4.0e-5
+    max: 5.0e-4
+  # NAdamW LR for convolutions, norms, decoder, heads. AdamW diverged on this
+  # family above ~2e-4 and the best trials sat at the low end of every sweep.
+  optimization.nadam_lr:
+    distribution: log_uniform_values
+    min: 2.0e-5
+    max: 2.0e-4
+  # Decoupled weight decay, AdamW-equivalent units for both halves. Upper end
+  # 0.1 (Moonlight's setting): the 30-epoch Muon run overfit, so stronger
+  # regularization is in scope.
+  optimization.muon_weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-1
+  optimization.nadam_weight_decay:
+    distribution: log_uniform_values
+    min: 1.0e-5
+    max: 1.0e-1
+  # Stochastic depth, linearly ramped over the 14 encoder blocks (HybridEncoder
+  # default 0.1; all earlier runs used 0).
+  model.drop_path:
+    distribution: uniform
+    min: 0.0
+    max: 0.3
+  # Weight of the Lovász-softmax term added to class-weighted CE.
+  data.lovasz_weight:
+    distribution: log_uniform_values
+    min: 0.2
+    max: 2.0

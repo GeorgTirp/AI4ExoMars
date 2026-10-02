@@ -85,6 +85,13 @@ def parse_args() -> argparse.Namespace:
                         help="Label id excluded from loss/metrics (NOAH-H "
                              "nodata/boundary = 255).")
     parser.add_argument(
+        "--lovasz-weight", type=float, default=0.0,
+        help="Add lovasz_weight x Lovász-softmax (Berman et al. 2018; a convex "
+             "per-class IoU surrogate, every class weighted equally) to the DC "
+             "training loss. 0.0 (default) = unchanged. Validation loss stays "
+             "plain CE so it remains comparable across runs.",
+    )
+    parser.add_argument(
         "--loss-kind",
         choices=("ce", "focal", "balanced_softmax", "logit_adjusted"),
         default="ce",
@@ -411,6 +418,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "context_cache_dir": args.context_cache_dir,
             "crop_cache_dir": args.crop_cache_dir,
             "loss_kind": args.loss_kind,
+            "lovasz_weight": args.lovasz_weight,
             "focal_gamma": args.focal_gamma,
             "logit_adjust_tau": args.logit_adjust_tau,
             "class_weight_scheme": args.class_weight_scheme,
@@ -945,6 +953,7 @@ def train_stage(config: dict, wandb_run=None) -> dict:
             num_classes_ig=num_classes_ig,
             ig_loss_weight=ig_loss_weight,
             ig_log_priors=ig_log_priors,
+            lovasz_weight=float(data_config.get("lovasz_weight", 0.0)),
             ema=ema,
             ema_source_model=base_model,
             progress_desc=f"Stage3 Epoch {epoch:02d}/{int(optimization['epochs']):02d} [train]",

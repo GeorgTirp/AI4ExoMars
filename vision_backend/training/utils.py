@@ -548,6 +548,9 @@ def run_segmentation_epoch(
     # behaviour and needs a GradScaler; "bf16" has fp32's exponent range, so it
     # cannot overflow where fp16 does and needs no scaler.
     amp_dtype: str = "fp16",
+    # Lovász-softmax (training/lovasz.py) added to the DC loss with this weight;
+    # 0.0 (default) leaves the loss unchanged.
+    lovasz_weight: float = 0.0,
 ) -> dict[str, float]:
     try:
         from tqdm.auto import tqdm
@@ -581,6 +584,17 @@ def run_segmentation_epoch(
         log_priors=dc_log_priors, logit_adjust_tau=logit_adjust_tau,
         ignore_index=ignore_index, head_label="dc",
     )
+    if lovasz_weight > 0:
+        try:
+            from vision_backend.training.lovasz import lovasz_softmax
+        except ModuleNotFoundError:
+            from training.lovasz import lovasz_softmax
+        base_dc_loss_fn = dc_loss_fn
+
+        def dc_loss_fn(logits, target):  # noqa: F811 -- deliberate wrap
+            return base_dc_loss_fn(logits, target) + lovasz_weight * lovasz_softmax(
+                logits, target, ignore_index=ignore_index
+            )
 
     ig_loss_fn = None
     if want_ig:
