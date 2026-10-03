@@ -1,0 +1,24 @@
+# Calibration / uncertainty quality (scripts/eval_uncertainty.py) of the plain
+# NAdamW baseline, HetSNGP, the 30-epoch Muon run and the best tuning-pilot trial.
+#   condor_submit_bid 20 eval_uncertainty.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = eval_unc.sh
+arguments  = checkpoints/pretrain_ab_scratch/best_30ep.pt checkpoints/hetsngp_scratch/best_30ep.pt checkpoints/muon_transformer_scratch/best_30ep.pt checkpoints/tune_simmim/best_16ep_3hke8pym.pt --loader-config-path data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_loader_DC_full.json --crop-cache-dir data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_crop_cache_full --batch-size 4 --json-out results/eval/uncertainty_512.json
+output = job_outputs/eval/unc.$(Cluster).out
+error  = job_outputs/eval/unc.$(Cluster).err
+log    = job_outputs/eval/unc.$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+requirements   = (TARGET.CUDAGlobalMemoryMb >= 40000) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost)
+getenv = True
++JobBatchName = "ai4exomars-eval-uncertainty"
+MaxTime = 5400
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Uncertainty eval exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Uncertainty eval exited non-zero -- check the .err log"
+queue 1

@@ -331,15 +331,20 @@ def maybe_run_sweep(
             f"The sweep is likely already finished/cancelled, or the id belongs to "
             f"another project/entity."
         )
+    failed = tally["started"] - tally["completed"] - tally["early_stopped"]
     if tally["early_stopped"]:
         print(f"[sweep] {tally['early_stopped']} trial(s) were early-stopped by the "
               f"scheduler (expected with hyperband, not failures).", flush=True)
-    if tally["completed"] == 0 and tally["early_stopped"] == tally["started"]:
+    # Several trials of one agent ALL stopped hints at early_terminate.min_iter
+    # vs --epochs. A single-trial agent (SWEEP_COUNT=1) whose trial hyperband
+    # stopped is the scheduler working as designed -- exiting non-zero there
+    # put the agent on hold and made a normal early stop look like a crash.
+    if tally["completed"] == 0 and tally["early_stopped"] == tally["started"] > 1:
         raise SweepConfigurationError(
             f"All {tally['started']} trial(s) for {sweep_id} were early-stopped and "
             f"none completed. Check early_terminate.min_iter against --epochs."
         )
-    if tally["completed"] == 0:
+    if tally["completed"] == 0 and failed > 0:
         raise SweepConfigurationError(
             f"All {tally['started']} sweep trial(s) failed for {sweep_id}. "
             f"First error was {type(first_error[0]).__name__}: {first_error[0]}"
