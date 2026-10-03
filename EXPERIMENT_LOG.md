@@ -94,8 +94,27 @@ Scratch arm of E4 with Muon (KellerJordan `SingleDeviceMuon`, pinned f98f1ca, mo
 
 ~2× faster to the same quality, peak +0.003 (within noise), then overfits; +11 % step time (83.9 ms).
 
-### E6 — HetSNGP output layer (wandb `ai4exomars_hetsngp`, cluster 17640120) — *running*
-Scratch arm of E4 with `decoder.head` replaced by a per-pixel heteroscedastic SNGP layer (Fortuin et al., TMLR 2022, arXiv:2110.02609; e5fafe8): RFF-GP output layer (m = 1024) + rank-6 heteroscedastic logit noise, τ = 1, 32/256 MC samples; Laplace covariance fitted post-training on the EMA weights. GPU smoke: +17 % step time, +1 GB. *Results to be added.*
+### E6 — HetSNGP output layer (wandb `ai4exomars_hetsngp`, cluster 17640120)
+Scratch arm of E4 with `decoder.head` replaced by a per-pixel heteroscedastic SNGP layer (Fortuin et al., TMLR 2022, arXiv:2110.02609; e5fafe8): RFF-GP output layer (m = 1024) + rank-6 heteroscedastic logit noise, τ = 1, 32/256 MC samples; Laplace covariance fitted post-training on the EMA weights (13.6 G labelled pixels, 35 min; mean relative posterior variance 2e-6). +17 % step time.
+
+| epoch | 5 | 10 | 15 | 20 | 26 (best) | 30 |
+|---|---|---|---|---|---|---|
+| HetSNGP | 0.1543 | 0.1746 | 0.1849 | 0.1957 | **0.2007** | 0.2002 |
+| plain (E4 scratch) | 0.1620 | 0.1777 | 0.1885 | 0.1950 | 0.2003 | 0.2001 |
+
+Slower start, identical final accuracy; IG head identical throughout. Uncertainty quality: see §4b — underconfident (T* = 0.70) and its predictive entropy does not flag errors; not adopted.
+
+### E7 — Tuning pilot: SimMIM + Muon + Lovász + drop-path, 16 epochs (wandb `ai4exomars_tune_simmim`, sweep jjo7a5f6)
+Cluster 17642635 (4 agents × 1 trial; bayes + hyperband). Lovász-softmax (Berman et al., CVPR 2018) added to class-weighted CE; +15 % step time (first wave ran 10× slow from an [N, C] dim-0 sort — fixed, 08f0c7c).
+
+| trial | best | Muon lr | NAdamW lr | Muon wd | NAdamW wd | drop-path | Lovász |
+|---|---|---|---|---|---|---|---|
+| 2 (3hke8pym) | **0.2055** | 1.9e-4 | 4.8e-5 | 0.013 | 0.027 | 0.10 | 0.63 |
+| 3 (v8ppu07f) | 0.2023 | 4.2e-4 | 5.8e-5 | 0.068 | 4e-5 | 0.05 | 0.68 |
+| 0 (qs7kgmov) | 0.192 (stopped ep 11) | 2.7e-4 | 8.4e-5 | 0.036 | 1e-4 | 0.19 | 0.54 |
+| 1 (ua0040n7) | 0.180 (stopped ep 6) | 6.8e-5 | 2.7e-5 | 3e-5 | 0.007 | 0.12 | 0.30 |
+
+Best model so far at ~half the compute of the 30-epoch runs; the separate contributions of Lovász and drop-path are not isolated.
 
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
@@ -117,12 +136,26 @@ Scratch arm of E4 with `decoder.head` replaced by a per-pixel heteroscedastic SN
 | Smooth bedrock | .000 | .001 | .000 | .001 | .000 | .000 | .000 | .003 |
 | **mIoU** | .1773 | .1777 | .1737 | .1772 | .1743 | **.2003** | .1937 | **.2032** |
 
+## 4b. Calibration and uncertainty (half of the 512 val set)
+`scripts/eval_uncertainty.py`, `results/eval/uncertainty_512.json`. Val split into interleaved halves: temperature T* fitted on A (Guo et al. 2017), everything reported on B. AUROC = misclassification detection (higher uncertainty on wrong pixels).
+
+| model | mIoU | NLL raw → T* | ECE raw → T* | AUROC entropy / 1−max p | T* |
+|---|---|---|---|---|---|
+| plain NAdamW (E4) | 0.2030 | 1.162 → 1.141 | 0.075 → 0.041 | 0.667 / 0.683 | 1.17 |
+| HetSNGP (E6) | 0.2026 | 1.202 → 1.142 | 0.146 → 0.050 | 0.387 / 0.622 | 0.70 |
+| Muon 30 ep (E5) | 0.2063 | 1.160 → 1.124 | 0.089 → 0.033 | 0.697 / 0.705 | 1.24 |
+| pilot trial 2 (E7) | **0.2074** | 1.132 → **1.112** | 0.075 → **0.032** | **0.696 / 0.706** | 1.17 |
+
+HetSNGP components alone: GP variance AUROC 0.682 (informative, distance-aware), heteroscedastic variance 0.447 (anti-informative). Plain models are mildly overconfident (T* 1.17–1.24); temperature scaling fixes calibration for free. No OOD test set yet — the GP's main use case is untested.
+
 ## 5. Effect sizes and trends
 
 | change | Δ mIoU | |
 |---|---|---|
 | **SimMIM hybrid vs best ConvNeXt-Swin** | **+0.023** | only effect clearly above noise |
 | Muon on transformer matrices | +0.003 peak, ~2× faster | overfits after ep 16 |
+| 16-ep Muon + Lovász + drop-path (pilot best) | +0.005 vs E4 | 0.2055, ~half the compute |
+| HetSNGP head | +0.0004 | no accuracy change; worse raw calibration |
 | width +9 M params (small → big) | +0.004 / +0.0005 | without / with context |
 | context branch (FiLM) | +0.0004 / +0.0035 | big / small |
 | cross-attention instead of FiLM | −0.003 | |
@@ -156,4 +189,4 @@ Scratch arm of E4 with `decoder.head` replaced by a per-pixel heteroscedastic SN
 | result rows | `results/variant_comparison/*.jsonl`, `results/pretrain_ab/*.jsonl`, `results/muon/*.jsonl`, `results/eval/*.json` |
 | checkpoints | `checkpoints/variant_v{0,1,2,3,3_xattn,2_1024}/best_30ep_<run>.pt`, `checkpoints/pretrain_ab_{scratch,pretrained}/`, `checkpoints/muon_transformer_scratch/`, `checkpoints/hetsngp_scratch/` |
 | logs | `job_outputs/variant_*/agent.<cluster>.<proc>.out`, `job_outputs/{pretrain_ab,muon,hetsngp}/` |
-| key commits | 1c5c76f (static compile, LR range, tiled eval), e5fafe8 (HetSNGP), b4e63b0 (Muon routing) |
+| key commits | 1c5c76f (static compile, LR range, tiled eval), e5fafe8 (HetSNGP), b4e63b0 (Muon routing), 08f0c7c (Lovász, tuning sweep), df3f47c (uncertainty eval) |
