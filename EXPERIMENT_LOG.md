@@ -116,6 +116,26 @@ Cluster 17642635 (4 agents × 1 trial; bayes + hyperband). Lovász-softmax (Berm
 
 Best model so far at ~half the compute of the 30-epoch runs; the separate contributions of Lovász and drop-path are not isolated.
 
+**Wave 2** (2026-10-03, cluster 17651879, 6 agents, same sweep — the search had the pilot's 4 trials): all 10 trials ranked —
+
+| rank | run | best | epochs | Muon lr | NAdamW lr | Muon wd | NAdamW wd | drop-path | Lovász |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | f1qeno3u | **0.2060** | 16 | 1.7e-4 | 6.1e-5 | 0.011 | 0.083 | 0.087 | 0.49 |
+| 2 | 3hke8pym | 0.2055 | 16 | 1.9e-4 | 4.8e-5 | 0.013 | 0.027 | 0.103 | 0.63 |
+| 3 | 2yai591u | 0.2037 | 16 | 1.4e-4 | 4.1e-5 | 0.010 | 0.024 | 0.056 | 0.66 |
+| 4 | v8ppu07f | 0.2023 | 16 | 4.2e-4 | 5.8e-5 | 0.068 | 4e-5 | 0.050 | 0.68 |
+| 5 | 3zwpua6t | 0.2018 | 16 | 2.9e-4 | 5.0e-5 | 0.016 | 0.037 | 0.056 | 0.70 |
+| 6 | cc4l2tff | 0.1942 | 11 (stopped) | 2.0e-4 | 4.9e-5 | 0.021 | 0.007 | 0.089 | 0.55 |
+| 7 | qs7kgmov | 0.1923 | 11 (stopped) | 2.7e-4 | 8.4e-5 | 0.036 | 1e-4 | 0.189 | 0.54 |
+| 8 | 48jjjmn7 | 0.1862 | 6 (stopped) | 1.7e-4 | 4.8e-5 | 0.057 | 0.038 | 0.118 | 0.45 |
+| 9 | klgk5p0g | 0.1838 | 6 (stopped) | 1.6e-4 | 3.2e-5 | 0.007 | 0.098 | 0.139 | 0.57 |
+| 10 | ua0040n7 | 0.1803 | 6 (stopped) | 6.8e-5 | 2.7e-5 | 3e-5 | 0.007 | 0.122 | 0.30 |
+
+- Plateau: the top three lie within 0.0023 (inside the ±0.004 seed noise) — little left to gain from these six hyperparameters.
+- Good region: Muon lr 1.4–1.9e-4 (AdamW-equivalent), NAdamW lr 4–6e-5, Muon wd ~0.01, NAdamW wd 0.02–0.08, drop-path 0.06–0.10, Lovász 0.5–0.65. Drop-path ≥ 0.12 hurts (4 of the 5 weakest).
+- Hyperband bias: correlation of LR with mIoU is +0.8 at epoch 5 but −0.7 among the epoch-10 survivors — min_iter 5 favours fast starters; use min_iter ≥ 8 in further sweeps.
+- Best overall model: f1qeno3u, 0.2060 (+0.006 over the 30-epoch NAdamW baseline at ~half the compute).
+
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
 
@@ -154,7 +174,7 @@ HetSNGP components alone: GP variance AUROC 0.682 (informative, distance-aware),
 |---|---|---|
 | **SimMIM hybrid vs best ConvNeXt-Swin** | **+0.023** | only effect clearly above noise |
 | Muon on transformer matrices | +0.003 peak, ~2× faster | overfits after ep 16 |
-| 16-ep Muon + Lovász + drop-path (pilot best) | +0.005 vs E4 | 0.2055, ~half the compute |
+| 16-ep Muon + Lovász + drop-path (sweep best, 10 trials) | +0.006 vs E4 | 0.2060, ~half the compute; plateau |
 | HetSNGP head | +0.0004 | no accuracy change; worse raw calibration |
 | width +9 M params (small → big) | +0.004 / +0.0005 | without / with context |
 | context branch (FiLM) | +0.0004 / +0.0035 | big / small |
