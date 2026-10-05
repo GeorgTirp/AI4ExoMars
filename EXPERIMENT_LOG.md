@@ -149,8 +149,16 @@ Top-3 tuning trials (f1qeno3u, 3hke8pym, 2yai591u), full 512 val; TTA = mean sof
 
 Small accuracy gains (+0.0017; members share recipe and seed, so errors are correlated), clearer calibration gains (ECE −13 %). Per class, best single vs baseline: Rectilinear ripples 0.160 → 0.201 (already 0.196 with Muon alone), Textured bedrock 0.091 → 0.097; Smooth bedrock and both Non-continuous small-ripple classes stay ≤ 0.04 — Lovász did not rescue the weak classes.
 
-### E9 — Architecture ablations at the tuned recipe (wandb `ai4exomars_arch_ablation`) — *running*
-Trial f1qeno3u's exact recipe and seed (0.2060) with one change: `no_global` (S4 global attention → shifted-window Swin block, param-matched) and `s3_depth2` (6 → 2 Swin blocks at 1/16, 24.7 M total params). Clusters 17666051 / 17666052. *Results to be added.*
+### E9 — Architecture ablations at the tuned recipe (wandb `ai4exomars_arch_ablation`)
+Trial f1qeno3u's exact recipe and seed 42 (reference 0.2060), one change each:
+
+| ablation | params | best val mIoU | Δ | train time |
+|---|---|---|---|---|
+| reference (f1qeno3u) | 31.8 M | 0.2060 | — | 6.1 h |
+| `no_global`: S4 global attention → shifted-window Swin (cluster 17666051) | 31.7 M | 0.2039 (ep 15) | −0.002 | 6.0 h |
+| `s3_depth2`: 6 → 2 Swin blocks at 1/16 (cluster 17666052) | 24.7 M | 0.2033 (ep 14) | −0.003 | 4.9 h |
+
+Both within seed noise (±0.004): neither global attention nor the deep 1/16 stage alone explains the HybridEncoder's lead over ConvNeXt-Swin (they may substitute for each other — `no_global_s3_depth2` tests both removed). `s3_depth2` is a cheaper near-equivalent (−22 % params, −19 % time). Train mIoU at epoch 16 is only ~0.30 (val 0.20) — the labels are hard to fit even on the training data.
 
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
