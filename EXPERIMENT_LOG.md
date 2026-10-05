@@ -136,6 +136,22 @@ Best model so far at ~half the compute of the 30-epoch runs; the separate contri
 - Hyperband bias: correlation of LR with mIoU is +0.8 at epoch 5 but −0.7 among the epoch-10 survivors — min_iter 5 favours fast starters; use min_iter ≥ 8 in further sweeps.
 - Best overall model: f1qeno3u, 0.2060 (+0.006 over the 30-epoch NAdamW baseline at ~half the compute).
 
+### E8 — Ensembling and flip TTA (2026-10-05, `results/eval/ensemble_tta_512.json`)
+Top-3 tuning trials (f1qeno3u, 3hke8pym, 2yai591u), full 512 val; TTA = mean softmax over identity / h / v / hv flips.
+
+| configuration | mIoU | pixel acc | NLL | ECE | AUROC (1−max p) |
+|---|---|---|---|---|---|
+| NAdamW baseline (E4) | 0.2003 | 0.620 | 1.154 | 0.071 | 0.687 |
+| best single (f1qeno3u) | 0.2060 | 0.626 | 1.120 | 0.070 | 0.706 |
+| best single + flip TTA | 0.2067 | 0.628 | 1.112 | 0.067 | 0.707 |
+| top-3 ensemble | 0.2075 | 0.629 | 1.104 | 0.063 | 0.709 |
+| top-3 ensemble + flip TTA | **0.2077** | 0.630 | **1.099** | **0.061** | 0.710 |
+
+Small accuracy gains (+0.0017; members share recipe and seed, so errors are correlated), clearer calibration gains (ECE −13 %). Per class, best single vs baseline: Rectilinear ripples 0.160 → 0.201 (already 0.196 with Muon alone), Textured bedrock 0.091 → 0.097; Smooth bedrock and both Non-continuous small-ripple classes stay ≤ 0.04 — Lovász did not rescue the weak classes.
+
+### E9 — Architecture ablations at the tuned recipe (wandb `ai4exomars_arch_ablation`) — *running*
+Trial f1qeno3u's exact recipe and seed (0.2060) with one change: `no_global` (S4 global attention → shifted-window Swin block, param-matched) and `s3_depth2` (6 → 2 Swin blocks at 1/16, 24.7 M total params). Clusters 17666051 / 17666052. *Results to be added.*
+
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
 

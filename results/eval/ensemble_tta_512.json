@@ -1,0 +1,130 @@
+{
+ "checkpoints": [
+  "checkpoints/pretrain_ab_scratch/best_30ep.pt",
+  "checkpoints/tune_simmim/best_16ep_f1qeno3u.pt",
+  "checkpoints/tune_simmim/best_16ep_3hke8pym.pt",
+  "checkpoints/tune_simmim/best_16ep_2yai591u.pt"
+ ],
+ "results": {
+  "baseline (NAdamW, 30 ep)": {
+   "miou": 0.20029668295552122,
+   "pixel_acc": 0.6194812588075524,
+   "nll": 1.1536701017407163,
+   "brier": 0.5371449432227853,
+   "ece": 0.07097360882085539,
+   "auroc_entropy": 0.6704149169593921,
+   "auroc_1-maxprob": 0.6869696017812532,
+   "per_class_iou": {
+    "Smooth + Featureless": 0.11679968529477155,
+    "Smooth + Lineated": 0.10777237045411814,
+    "Textured non-bedrock": 0.49425402936330776,
+    "Smooth bedrock": 0.00038660261736379734,
+    "Textured bedrock": 0.09098787175521891,
+    "Rugged bedrock": 0.5583635935699893,
+    "Fractured bedrock": 0.3150772435121629,
+    "Continuous + Simple form large ripples": 0.4577698891787561,
+    "Isolated + Simple form large ripples": 0.11873045119539817,
+    "Rectilinear form large ripples": 0.16003993234116903,
+    "Continuous small ripples": 0.14584122638769104,
+    "Bedrock substrate + Non-continuous small ripples": 0.0017815508787693355,
+    "Non-bedrock substrate + Non-continuous small ripples": 0.036052431873059676
+   }
+  },
+  "best single": {
+   "miou": 0.20599236629056236,
+   "pixel_acc": 0.62557995856378,
+   "nll": 1.1194723388154482,
+   "brier": 0.5237617882290302,
+   "ece": 0.06976014245908102,
+   "auroc_entropy": 0.693670352723357,
+   "auroc_1-maxprob": 0.7062770564079323,
+   "per_class_iou": {
+    "Smooth + Featureless": 0.11377204336989827,
+    "Smooth + Lineated": 0.10812979298798622,
+    "Textured non-bedrock": 0.5071527815886953,
+    "Smooth bedrock": 0.0018740850306746136,
+    "Textured bedrock": 0.09695964240382048,
+    "Rugged bedrock": 0.5574145714504402,
+    "Fractured bedrock": 0.31844115972999104,
+    "Continuous + Simple form large ripples": 0.4561202385320934,
+    "Isolated + Simple form large ripples": 0.11644489339345565,
+    "Rectilinear form large ripples": 0.20141570370626508,
+    "Continuous small ripples": 0.15110984135023198,
+    "Bedrock substrate + Non-continuous small ripples": 0.009268095974191815,
+    "Non-bedrock substrate + Non-continuous small ripples": 0.03979791225956689
+   }
+  },
+  "best single + flip TTA": {
+   "miou": 0.2066723838084535,
+   "pixel_acc": 0.6274969947113263,
+   "nll": 1.1124282709946474,
+   "brier": 0.521327618786171,
+   "ece": 0.0665385169979469,
+   "auroc_entropy": 0.6942902392409231,
+   "auroc_1-maxprob": 0.7066799924961732,
+   "per_class_iou": {
+    "Smooth + Featureless": 0.11704103609648696,
+    "Smooth + Lineated": 0.10782253167103065,
+    "Textured non-bedrock": 0.509707633685872,
+    "Smooth bedrock": 0.0027658188103238863,
+    "Textured bedrock": 0.09645415031382869,
+    "Rugged bedrock": 0.5588150541113838,
+    "Fractured bedrock": 0.3208066650898628,
+    "Continuous + Simple form large ripples": 0.46043225656471026,
+    "Isolated + Simple form large ripples": 0.11391919223003527,
+    "Rectilinear form large ripples": 0.200380453427244,
+    "Continuous small ripples": 0.1507974895718581,
+    "Bedrock substrate + Non-continuous small ripples": 0.005107721787767363,
+    "Non-bedrock substrate + Non-continuous small ripples": 0.042690986149492204
+   }
+  },
+  "top-3 ensemble": {
+   "miou": 0.20748596835789676,
+   "pixel_acc": 0.6285919472253108,
+   "nll": 1.1039454254573189,
+   "brier": 0.5184147210531935,
+   "ece": 0.06279221184803997,
+   "auroc_entropy": 0.6983058772341115,
+   "auroc_1-maxprob": 0.7090621681803895,
+   "per_class_iou": {
+    "Smooth + Featureless": 0.11950233702825568,
+    "Smooth + Lineated": 0.10435397576572455,
+    "Textured non-bedrock": 0.5091925154237472,
+    "Smooth bedrock": 0.0004188620637458295,
+    "Textured bedrock": 0.09775685304785882,
+    "Rugged bedrock": 0.562139548456235,
+    "Fractured bedrock": 0.32487846873297926,
+    "Continuous + Simple form large ripples": 0.46494677272738727,
+    "Isolated + Simple form large ripples": 0.11305399949720084,
+    "Rectilinear form large ripples": 0.20068544608994932,
+    "Continuous small ripples": 0.14973279772925643,
+    "Bedrock substrate + Non-continuous small ripples": 0.009785494597933809,
+    "Non-bedrock substrate + Non-continuous small ripples": 0.04087051749238365
+   }
+  },
+  "top-3 ensemble + flip TTA": {
+   "miou": 0.20772408959491326,
+   "pixel_acc": 0.6299585552257385,
+   "nll": 1.098555561190241,
+   "brier": 0.5165342821372363,
+   "ece": 0.06050297920599844,
+   "auroc_entropy": 0.69898290767555,
+   "auroc_1-maxprob": 0.709645681110031,
+   "per_class_iou": {
+    "Smooth + Featureless": 0.12121431864131714,
+    "Smooth + Lineated": 0.10382794786035,
+    "Textured non-bedrock": 0.5111961999224547,
+    "Smooth bedrock": 0.0004262367724169946,
+    "Textured bedrock": 0.09899954666268564,
+    "Rugged bedrock": 0.5632088375138216,
+    "Fractured bedrock": 0.32677006638304024,
+    "Continuous + Simple form large ripples": 0.46550002442019156,
+    "Isolated + Simple form large ripples": 0.11107577191322328,
+    "Rectilinear form large ripples": 0.1991676555493212,
+    "Continuous small ripples": 0.15034880542615026,
+    "Bedrock substrate + Non-continuous small ripples": 0.007665029118001107,
+    "Non-bedrock substrate + Non-continuous small ripples": 0.0410127245508982
+   }
+  }
+ }
+}
