@@ -15,9 +15,9 @@ except ModuleNotFoundError:
     )
 
 try:
-    from vision_backend.model.hybrid_encoder import STAGE_DIMS, HybridEncoder
+    from vision_backend.model.hybrid_encoder import STAGE_DEPTHS, STAGE_DIMS, HybridEncoder
 except ModuleNotFoundError:
-    from model.hybrid_encoder import STAGE_DIMS, HybridEncoder
+    from model.hybrid_encoder import STAGE_DEPTHS, STAGE_DIMS, HybridEncoder
 
 from .segmentation import ContextAwareSegmentationModel, SingleBranchSegmentationModel
 from .utils import extract_state_dict, load_checkpoint, load_prefixed_state_dict
@@ -101,6 +101,8 @@ def build_simmim_encoder(model_config: dict[str, Any]) -> HybridEncoder:
         window_size=model_config.get("window_size", 8),
         drop_path=model_config.get("drop_path", 0.0),
         use_checkpoint=model_config.get("use_checkpoint", False),
+        s3_depth=int(model_config.get("hybrid_s3_depth", STAGE_DEPTHS[2])),
+        s4_global=bool(model_config.get("hybrid_s4_global", True)),
     )
 
 

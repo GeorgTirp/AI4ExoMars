@@ -45,15 +45,31 @@ class HybridEncoder(nn.Module):
         window_size: int = WINDOW_SIZE,
         drop_path: float = MAX_DROP_PATH,
         use_checkpoint: bool = False,
+        s3_depth: int = STAGE_DEPTHS[2],
+        s4_global: bool = True,
     ):
+        """`s3_depth` and `s4_global` exist only for architecture ablations; the
+        defaults are the frozen layout above (checkpoints round-trip unchanged).
+
+        s3_depth   number of Swin blocks at 1/16 (frozen: 6; even, so window /
+                   shifted-window pairs stay complete)
+        s4_global  False swaps the S4 global-attention block for a shifted-window
+                   Swin block of the same width and heads -- S4 then mixes only
+                   within (shifted) 8x8 windows instead of across the whole grid
+        """
         super().__init__()
+        if s3_depth < 1:
+            raise ValueError(f"s3_depth must be >= 1, got {s3_depth}")
         self.in_channels = in_channels
         self.window_size = window_size
         self.use_checkpoint = use_checkpoint
+        self.s3_depth = s3_depth
+        self.s4_global = s4_global
 
         d1, d2, d3, d4 = STAGE_DIMS
-        n1, n2, n3, n4 = STAGE_DEPTHS
-        total_blocks = n1 + n2 + n3 + n4  # 14
+        n1, n2, _, n4 = STAGE_DEPTHS
+        n3 = s3_depth
+        total_blocks = n1 + n2 + n3 + n4  # 14 in the frozen layout
         dp_rates = torch.linspace(0.0, drop_path, total_blocks).tolist()
 
         # stem: 4x4 conv stride 4 (patchify), 1 -> 96
@@ -91,6 +107,23 @@ class HybridEncoder(nn.Module):
 
         self.down3 = Downsample2x(d3, d4)
         # S4: 1 Swin (W-MSA) + 1 global attention, stride 32, 24 heads
+        # (ablation s4_global=False: the second block is a shifted-window Swin block)
+        second = (
+            GlobalAttentionBlock(
+                dim=d4,
+                num_heads=S4_HEADS,
+                base_grid=global_base_grid,
+                drop_path=dp_rates[i + 1],
+            )
+            if s4_global
+            else SwinTransformerBlock(
+                dim=d4,
+                num_heads=S4_HEADS,
+                window_size=window_size,
+                shift_size=window_size // 2,
+                drop_path=dp_rates[i + 1],
+            )
+        )
         self.s4 = nn.ModuleList(
             [
                 SwinTransformerBlock(
@@ -100,12 +133,7 @@ class HybridEncoder(nn.Module):
                     shift_size=0,
                     drop_path=dp_rates[i],
                 ),
-                GlobalAttentionBlock(
-                    dim=d4,
-                    num_heads=S4_HEADS,
-                    base_grid=global_base_grid,
-                    drop_path=dp_rates[i + 1],
-                ),
+                second,
             ]
         )
 

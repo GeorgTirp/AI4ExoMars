@@ -293,6 +293,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--strict-checkpoint-load", action="store_true")
     # simmim (single-branch HybridEncoder) hyperparameters
     parser.add_argument("--global-base-grid", type=int, default=32)
+    parser.add_argument(
+        "--hybrid-s3-depth", type=int, default=6,
+        help="Architecture ablation (simmim HybridEncoder): number of Swin blocks "
+             "at 1/16 resolution. 6 = the frozen layout.",
+    )
+    parser.add_argument(
+        "--hybrid-s4-block", choices=("global", "swin"), default="global",
+        help="Architecture ablation: the second S4 block (1/32) is global "
+             "attention (frozen layout) or a shifted-window Swin block.",
+    )
     # legacy context-model hyperparameters (only used with --model-kind context)
     parser.add_argument("--local-base-channels", type=int, default=32)
     parser.add_argument("--context-base-channels", type=int, default=16)
@@ -448,6 +458,8 @@ def build_config(args: argparse.Namespace) -> dict:
             "drop_path": args.drop_path,
             # simmim single-branch
             "global_base_grid": args.global_base_grid,
+            "hybrid_s3_depth": args.hybrid_s3_depth,
+            "hybrid_s4_global": args.hybrid_s4_block == "global",
             # legacy context two-branch (ignored when model_kind == 'simmim')
             "local_base_channels": args.local_base_channels,
             "context_base_channels": args.context_base_channels,

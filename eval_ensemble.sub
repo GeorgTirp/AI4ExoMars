@@ -1,0 +1,23 @@
+# Ensembling + flip TTA (scripts/eval_ensemble.py) of the top-3 tuning trials vs the best single model and the NAdamW baseline.
+#   condor_submit_bid 20 eval_uncertainty.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = eval_ens.sh
+arguments  = --baseline checkpoints/pretrain_ab_scratch/best_30ep.pt --members checkpoints/tune_simmim/best_16ep_f1qeno3u.pt checkpoints/tune_simmim/best_16ep_3hke8pym.pt checkpoints/tune_simmim/best_16ep_2yai591u.pt --loader-config-path data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_loader_DC_full.json --crop-cache-dir data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/seg_crop_cache_full --batch-size 4 --json-out results/eval/ensemble_tta_512.json
+output = job_outputs/eval/ens.$(Cluster).out
+error  = job_outputs/eval/ens.$(Cluster).err
+log    = job_outputs/eval/ens.$(Cluster).log
+request_cpus   = 8
+request_memory = 32768
+request_gpus   = 1
+requirements   = (TARGET.CUDAGlobalMemoryMb >= 40000) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost)
+getenv = True
++JobBatchName = "ai4exomars-eval-ensemble"
+MaxTime = 5400
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Uncertainty eval exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Uncertainty eval exited non-zero -- check the .err log"
+queue 1
