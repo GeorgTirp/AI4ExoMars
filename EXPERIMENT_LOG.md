@@ -160,6 +160,16 @@ Trial f1qeno3u's exact recipe and seed 42 (reference 0.2060), one change each:
 
 Both within seed noise (±0.004): neither global attention nor the deep 1/16 stage alone explains the HybridEncoder's lead over ConvNeXt-Swin (they may substitute for each other — `no_global_s3_depth2` tests both removed). `s3_depth2` is a cheaper near-equivalent (−22 % params, −19 % time). Train mIoU at epoch 16 is only ~0.30 (val 0.20) — the labels are hard to fit even on the training data.
 
+### E10 — Recipe ablations at the tuned recipe (wandb `ai4exomars_arch_ablation`)
+Same reference and seed as E9 (f1qeno3u, 0.2060), one recipe component removed:
+
+| ablation | best val mIoU | Δ | notes |
+|---|---|---|---|
+| `no_lovasz` (Lovász weight 0; cluster 17667323) | **0.2072** (ep 15) | +0.001 | no benefit from Lovász; 15 % faster without it |
+| `no_droppath` (drop-path 0; cluster 17667324) | 0.1995 (ep 13) | **−0.007** | learns faster early, peaks at ep 13 and declines to 0.1975 — overfits |
+
+Drop-path is the one component clearly above the ±0.004 noise floor; Lovász can be dropped (no accuracy gain, +15 % cost, did not lift the weak classes in E8). **Recommended recipe:** HybridEncoder from scratch, Muon on transformer matrices + NAdamW, drop-path ≈ 0.09, no Lovász, 16 epochs, f1qeno3u's LRs/WDs (optionally `s3_depth2`, −0.003 for −22 % params / −19 % time).
+
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
 
