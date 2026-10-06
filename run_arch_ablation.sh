@@ -4,9 +4,12 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Architecture ablations of the HybridEncoder at the tuned recipe.
 #
-# Reference: tuning trial f1qeno3u (sweep jjo7a5f6), val mIoU 0.2060 -- same
-# code, seed 42, data order, 16 epochs, Muon (transformer matrices, match_adam)
-# + NAdamW, Lovász, drop-path, and exactly its hyperparameters (below).
+# Recipe: tuning trial f1qeno3u's hyperparameters (sweep jjo7a5f6) -- seed 42,
+# data order, 16 epochs, Muon (transformer matrices, match_adam) + NAdamW,
+# drop-path -- WITHOUT Lovász (retired after E10). Reference for runs from
+# 2026-10-06 on: ABLATION=none == the E10 no_lovasz run, val mIoU 0.2072.
+# The E9 (no_global, s3_depth2) and E10 (no_droppath) runs still had Lovász
+# (weight 0.49) on top; their reference was f1qeno3u itself (0.2060).
 #
 #   ABLATION=no_global  S4 global-attention block -> shifted-window Swin block
 #                       (27.57 M vs 27.66 M encoder params: param-matched)
@@ -14,7 +17,6 @@ set -euo pipefail
 #                       -26 %: depth and capacity drop together)
 #   ABLATION=none       the reference itself (a re-run / seed control)
 #   ABLATION=no_global_s3_depth2  both architecture ablations together
-#   ABLATION=no_lovasz  recipe ablation: Lovász weight 0 (class-weighted CE only)
 #   ABLATION=no_droppath  recipe ablation: drop-path 0
 #
 #   ABLATION=no_global condor_submit_bid 20 run_arch_ablation.sub
@@ -23,14 +25,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${AI4EXOMARS_ROOT:-$SCRIPT_DIR}"
 
-: "${ABLATION:?ABLATION is not set -- no_global, s3_depth2, no_global_s3_depth2, no_lovasz, no_droppath or none}"
-LOVASZ_WEIGHT=0.49114339221744663
+: "${ABLATION:?ABLATION is not set -- no_global, s3_depth2, no_global_s3_depth2, no_droppath or none}"
 DROP_PATH=0.08716622036277302
 case "$ABLATION" in
   no_global)           ARCH_ARGS=(--hybrid-s4-block swin) ;;
   s3_depth2)           ARCH_ARGS=(--hybrid-s3-depth 2) ;;
   no_global_s3_depth2) ARCH_ARGS=(--hybrid-s4-block swin --hybrid-s3-depth 2) ;;
-  no_lovasz)           ARCH_ARGS=(); LOVASZ_WEIGHT=0.0 ;;
   no_droppath)         ARCH_ARGS=(); DROP_PATH=0.0 ;;
   none)                ARCH_ARGS=() ;;
   *) echo "ERROR: unknown ABLATION '$ABLATION'" >&2; exit 1 ;;
@@ -65,7 +65,7 @@ export WANDB_CONSOLE=wrap
 
 python -c "import muon" || { echo "ERROR: muon not installed in the venv" >&2; exit 1; }
 echo "Host: $(hostname)"
-echo "Ablation: $ABLATION  (${ARCH_ARGS[*]:-frozen layout})  drop-path $DROP_PATH  lovasz $LOVASZ_WEIGHT  seed $SEED"
+echo "Ablation: $ABLATION  (${ARCH_ARGS[*]:-frozen layout})  drop-path $DROP_PATH  seed $SEED"
 command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L || true
 
 python -m vision_backend.train_stage3_segmentation_finetune \
@@ -95,7 +95,6 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --muon-momentum 0.95 \
   --nadam-lr 6.0799948094711265e-05 \
   --nadam-weight-decay 0.08314524730626249 \
-  --lovasz-weight "$LOVASZ_WEIGHT" \
   --ig-loss-weight 0.4 \
   --ema-decay 0.9999 \
   --seed "$SEED" \
@@ -109,6 +108,6 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --wandb-project ai4exomars_arch_ablation \
   --wandb-group arch-ablation \
   --wandb-job-type "$ABLATION" \
-  --wandb-tags arch-ablation "$ABLATION" simmim muon lovasz
+  --wandb-tags arch-ablation "$ABLATION" simmim muon
 
 echo "Ablation $ABLATION (seed $SEED) finished cleanly at $(date -Is)."

@@ -1,13 +1,14 @@
 # Wandb sweep -- tuning the production candidate: SimMIM HybridEncoder (scratch)
-# + Muon on the transformer matrices + Lovász-softmax + stochastic depth, 16 epochs.
+# + Muon on the transformer matrices + stochastic depth, 16 epochs.
 #
 # Why this model (EXPERIMENT_LOG.md): the HybridEncoder is the only design
 # change clearly above noise (+0.023 mIoU over ConvNeXt-Swin); SimMIM
 # pretraining did not help; Muon reached the 30-epoch NAdamW quality in ~half
 # the epochs and peaked at epoch 16 (0.2032) before overfitting -- hence the
-# 16-epoch schedule and drop-path. Lovász targets the per-class IoU that the
-# metric averages (Textured bedrock, 17.5 % of pixels, sits at IoU ~0.09 with
-# the minimum class weight).
+# 16-epoch schedule and drop-path.
+# Lovász-softmax was part of this sweep for the pilot (jjo7a5f6, E7) and was
+# retired after the E10 ablation showed no benefit (0.2072 without vs 0.2060
+# with, +15 % step time); its code is in git history (08f0c7c).
 #
 # Fixed (run_tune_simmim.sh): scratch init, --use-muon --muon-scope transformer
 # --muon-lr-mode match_adam (Moonlight RMS matching: muon_lr / muon_weight_decay
@@ -74,8 +75,3 @@ parameters:
     distribution: uniform
     min: 0.0
     max: 0.3
-  # Weight of the Lovász-softmax term added to class-weighted CE.
-  data.lovasz_weight:
-    distribution: log_uniform_values
-    min: 0.2
-    max: 2.0

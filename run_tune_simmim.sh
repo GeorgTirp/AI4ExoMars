@@ -5,13 +5,12 @@ set -euo pipefail
 # Sweep agent: tune the production candidate (config/tune_simmim_muon_sweep.yaml)
 #   SimMIM HybridEncoder, random init
 #   + Muon on the 32 transformer matrices (match_adam LR transfer), NAdamW rest
-#   + Lovász-softmax added to class-weighted CE
 #   + stochastic depth
 #   16 epochs per trial (the 30-epoch Muon run peaked at epoch 16).
 #
-# The sweep sets muon_lr, nadam_lr, muon_weight_decay, nadam_weight_decay,
-# drop_path and lovasz_weight per trial; the values below are only the base
-# config they override. Everything else matches the E4/E5 runs.
+# The sweep sets muon_lr, nadam_lr, muon_weight_decay, nadam_weight_decay
+# and drop_path per trial (Lovász was swept in the pilot, then retired); the
+# values below are only the base config they override. Everything else matches the E4/E5 runs.
 #
 #   wandb sweep --project ai4exomars_tune_simmim config/tune_simmim_muon_sweep.yaml
 #   SWEEP_ID=<entity/project/id> NTRIALS=4 condor_submit_bid 20 run_tune_simmim.sub
@@ -80,7 +79,6 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --muon-momentum 0.95 \
   --nadam-lr 1.107e-4 \
   --nadam-weight-decay 5.16e-5 \
-  --lovasz-weight 1.0 \
   --ig-loss-weight 0.4 \
   --ema-decay 0.9999 \
   --seed 42 \
@@ -95,7 +93,7 @@ python -m vision_backend.train_stage3_segmentation_finetune \
   --wandb-project ai4exomars_tune_simmim \
   --wandb-group tune-simmim-muon \
   --wandb-job-type tune \
-  --wandb-tags tune simmim muon lovasz droppath \
+  --wandb-tags tune simmim muon droppath \
   --wandb-sweep-id "$SWEEP_ID" \
   --wandb-sweep-count "${SWEEP_COUNT:-1}"
 

@@ -1,4 +1,4 @@
-# Sweep agents for the SimMIM + Muon + Lovász + drop-path tuning sweep
+# Sweep agents for the SimMIM + Muon + drop-path tuning sweep
 # (config/tune_simmim_muon_sweep.yaml, wandb project ai4exomars_tune_simmim).
 # One queued job = one agent = SWEEP_COUNT trials (default 1, 16 epochs each).
 #

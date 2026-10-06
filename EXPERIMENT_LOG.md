@@ -170,6 +170,8 @@ Same reference and seed as E9 (f1qeno3u, 0.2060), one recipe component removed:
 
 Drop-path is the one component clearly above the ±0.004 noise floor; Lovász can be dropped (no accuracy gain, +15 % cost, did not lift the weak classes in E8). **Recommended recipe:** HybridEncoder from scratch, Muon on transformer matrices + NAdamW, drop-path ≈ 0.09, no Lovász, 16 epochs, f1qeno3u's LRs/WDs (optionally `s3_depth2`, −0.003 for −22 % params / −19 % time).
 
+**Lovász retired 2026-10-06**: `training/lovasz.py`, `--lovasz-weight`, its tests and the speed diagnostic were removed (recoverable from git, 08f0c7c–3f4505d); sweep config and launchers no longer pass it. E7–E10 runs used it as recorded above.
+
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
 
