@@ -172,6 +172,16 @@ Drop-path is the one component clearly above the ±0.004 noise floor; Lovász ca
 
 **Lovász retired 2026-10-06**: `training/lovasz.py`, `--lovasz-weight`, its tests and the speed diagnostic were removed (recoverable from git, 08f0c7c–3f4505d); sweep config and launchers no longer pass it. E7–E10 runs used it as recorded above.
 
+### E11 — Both architecture ablations together, tuned recipe without Lovász (cluster 17677614)
+`no_global_s3_depth2`: S4 global attention → shifted-window Swin **and** 6 → 2 Swin blocks at 1/16; seed 42; reference = E10 `no_lovasz` (same recipe, full encoder, 0.2072).
+
+| run | params | best val mIoU | Δ | wall time |
+|---|---|---|---|---|
+| reference (full HybridEncoder) | 31.8 M | 0.2072 (ep 15) | — | 5.2 h |
+| `no_global_s3_depth2` | 24.6 M | 0.2055 (ep 15) | −0.002 | 3.9 h |
+
+Slower start (0.176 vs 0.181 at ep 5), caught up by ep 13. Removing both sources of long-range within-crop mixing costs nothing measurable, so they do **not** explain the HybridEncoder's lead over ConvNeXt-Swin; remaining candidates: the ConvNeXt-V2 stages, the 4×4 stem / no 1/2-res features, widths, or training-setup confounds (E1 ran fp16 with swept LRs, E4 bf16 with a fixed LR; ConvNeXt-Swin was never trained with the current recipe). Practical: a lean variant at −23 % params / −25 % training time for −0.002.
+
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
 
