@@ -291,7 +291,39 @@ The planetary scientists label whole 512 × 512 blocks with **one class each**: 
 - **Split**: spatial, 1 km cells. Of 300 random cell assignments, the one covering the most classes is kept. Result: train 1 337 (59 %), val 338 (15 %), test 355 (16 %), and a buffer of 230 train blocks touching val/test.
   - Rare classes are near-unmeasurable: Smooth non-bedrock 1/0/0, Fractured bedrock 3/1/0, Periodic Bedrock Ridges 2/1/1, Boulder Fields 6/2/3.
   - So model selection uses val macro-F1 over the classes with ≥ 5 val blocks (`macro_f1_sel`).
-- Run 1, `experts_v1_plain` (cluster 17696189): plain LP-FT, 30 epochs (2 probe), E10 segmenter. This is the baseline for the Laplace-prior version planned next.
+### E13 — Plain block fine-tune on the expert labels (cluster 17696189, wandb `ai4exomars_block_finetune`, `results/block_finetune/experts_v1_plain.json`)
+LP-FT with 2 probe epochs then 28 full; E10 segmenter; ~35 s/epoch, 17 min in total. Best epoch 25 (val `macro_f1_sel` 0.594).
+
+| test (355 blocks) | accuracy | balanced acc. | macro-F1 (present classes) | macro-F1 (≥ 5 test blocks) | NLL | ECE |
+|---|---|---|---|---|---|---|
+| majority class (Rugged bedrock) | 0.358 | | | | | |
+| zero-shot segmenter (val) | 0.018 | 0.148 | 0.026 | | 3.39 | 0.37 |
+| **fine-tuned** | **0.656** | 0.331 | 0.320 | 0.440 | 1.74 | 0.26 |
+
+- **Per class (test F1)**:
+
+  | class | test blocks | train blocks | F1 |
+  |---|---|---|---|
+  | Rugged bedrock | 127 | | 0.88 |
+  | Craters (new) | 59 | 159 | 0.74 |
+  | Isolated large ripples | 47 | | 0.67 |
+  | Textured bedrock | 36 | | 0.47 |
+  | Discontinuous small ripples on bedrock | 42 | | 0.47 |
+  | Smooth bedrock | 5 | | 0.29 |
+  | Continuous small ripples (19 of 22 → discontinuous-on-bedrock) | 22 | 16 | 0 |
+  | Discontinuous small ripples, non-bedrock | 9 | | 0 |
+  | Continuous large ripples | 4 | | 0 |
+  | Boulder fields | 3 | | 0 |
+  | Periodic Bedrock Ridges | 1 | | 0 |
+
+  Classes with fewer than about 30 training blocks are not learned.
+- **Zero-shot collapse = domain shift**: on this observation the untuned segmenter puts almost every block into two classes that are *rare* at Oxia. Of 338 val blocks, 152 go to Smooth bedrock (0.4 % of Oxia pixels) and 145 to Rectilinear large ripples (2.4 %). For example, Craters → Rectilinear 41/44, and discontinuous ripples on bedrock → Smooth bedrock 107/130. Brightness and contrast are matched (mean 120, std 22 vs 25), so the shift is in texture or sensor characteristics, or site geology.
+  - The *features* transfer: a head trained on the frozen segmenter reaches 0.58 val accuracy after two probe epochs.
+  - The NOAH-H *class mapping* does not.
+  - Consequence for a Laplace prior: keep the backbone anchored, keep the decoder and segmentation head loose.
+- **Overconfident**: val NLL is lowest at epoch 4 (1.13) and rises while F1 still improves; test ECE is 0.26. Calibration (temperature scaling / Laplace predictive) is needed before the probabilities are used.
+- The val vs test `macro_f1_sel` values (0.594 vs 0.440) cover different class sets (test adds Continuous small ripples and Smooth bedrock) and val was used for selection, so they are not directly comparable.
+- Single run; per-class numbers for classes with fewer than 10 test blocks are anecdotal.
 
 ## 8. Where things are
 | | |

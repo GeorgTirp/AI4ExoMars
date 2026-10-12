@@ -362,8 +362,12 @@ def main() -> None:
         log_metrics(wandb_run, {"epoch": epoch, "train/loss": row["train_loss"], "lr/head": row["head_lr"],
                                 "lr/seg": row["seg_lr"], "prior_scale": row["prior_scale"],
                                 **scalars("val", val)}, step=epoch)
-        if val["macro_f1_sel"] > best_f1:
-            best_f1, best_epoch = val["macro_f1_sel"], epoch
+        # NaN when no class reaches --select-min-support val blocks: fall back to
+        # plain macro-F1, and always keep at least the first epoch's checkpoint.
+        score = val["macro_f1_sel"] if math.isfinite(val["macro_f1_sel"]) else val["macro_f1"]
+        score = score if math.isfinite(score) else -math.inf
+        if best_epoch == 0 or score > best_f1:
+            best_f1, best_epoch = score, epoch
             torch.save({"block_state": model.state_dict(),
                         "seg_model_config": seg_model_config_from(model.seg, seg_config),
                         "classes": {"names": classes.names, "seg_index": classes.seg_index},
