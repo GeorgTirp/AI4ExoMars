@@ -182,6 +182,17 @@ Drop-path is the one component clearly above the ±0.004 noise floor; Lovász ca
 
 Slower start (0.176 vs 0.181 at ep 5), caught up by ep 13. Removing both sources of long-range within-crop mixing costs nothing measurable, so they do **not** explain the HybridEncoder's lead over ConvNeXt-Swin; remaining candidates: the ConvNeXt-V2 stages, the 4×4 stem / no 1/2-res features, widths, or training-setup confounds (E1 ran fp16 with swept LRs, E4 bf16 with a fixed LR; ConvNeXt-Swin was never trained with the current recipe). Practical: a lean variant at −23 % params / −25 % training time for −0.002.
 
+### E12 — Recipe transfer: ConvNeXt-Swin v0 with the tuned recipe (wandb `ai4exomars_recipe_transfer`, cluster 17695149)
+v0 (big, no context) with exactly the E10 `no_lovasz` recipe: Muon on its 24 Swin matrices + NAdamW, drop-path 0.087 (v0 applies it uniformly to its Swin blocks), bf16, 16 epochs, seed 42, f1qeno3u's LRs/WDs. 6.2 h, 102.8 ms/step.
+
+| model | old setup (NAdamW, fp16, 30 ep) | tuned recipe | recipe gain |
+|---|---|---|---|
+| ConvNeXt-Swin v0 (28.8 M) | 0.1773 mean / 0.1809 best | **0.1882** (ep 16) | +0.007 … +0.011 |
+| HybridEncoder (31.8 M) | 0.2003 | **0.2072** | +0.007 |
+| lean HybridEncoder (24.6 M, E11) | — | 0.2055 | |
+
+Under the same recipe the HybridEncoder still leads by **+0.019** (~80 % of the original +0.023): the encoder is the main cause, and the recipe improves both architectures about equally. With global attention and S3 depth ruled out (E9, E11), the advantage sits in the convolutional front end — ConvNeXt-V2 (GRN) stages at 1/4 and 1/8, the 4×4 patchify stem (no 1/2-res features) and wider early channels. Caveat: single runs; LRs tuned on the HybridEncoder (v0 still rising at ep 16).
+
 ## 4. Unified per-class evaluation (512 val, all 30-epoch models)
 `results/eval/all512_30ep.json` (eval_all512.sub). Mean IoU over trials; ★ = best.
 
