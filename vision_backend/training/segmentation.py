@@ -143,16 +143,17 @@ class LightweightSegmentationDecoder(nn.Module):
         # for resume/inference -- Dropout modules hold no state_dict entries.
         self.head_dropout = nn.Dropout2d(dropout)
 
-    def forward(
+    def decode_features(
         self,
         *,
         bottleneck: torch.Tensor,
         skip8: torch.Tensor,
         skip4: torch.Tensor,
         skip2: torch.Tensor,
-        output_size: tuple[int, int],
-        return_ig: bool = False,
-    ):
+    ) -> torch.Tensor:
+        """Fused decoder features at the skip2 resolution -- the input of
+        `head` (before `head_dropout`). Shared by `forward` and the block-level
+        classifier (model/block_head.py)."""
         if self.aspp is not None:
             bottleneck = self.aspp(bottleneck)
         x = self.bottleneck_proj(bottleneck)
@@ -164,7 +165,19 @@ class LightweightSegmentationDecoder(nn.Module):
         x = self.fuse4(x + self.skip4_proj(skip4))
 
         x = F.interpolate(x, size=skip2.shape[2:], mode="bilinear", align_corners=False)
-        x = self.fuse2(x + self.skip2_proj(skip2))
+        return self.fuse2(x + self.skip2_proj(skip2))
+
+    def forward(
+        self,
+        *,
+        bottleneck: torch.Tensor,
+        skip8: torch.Tensor,
+        skip4: torch.Tensor,
+        skip2: torch.Tensor,
+        output_size: tuple[int, int],
+        return_ig: bool = False,
+    ):
+        x = self.decode_features(bottleneck=bottleneck, skip8=skip8, skip4=skip4, skip2=skip2)
 
         # Classify at the decoder's own resolution, then upsample the logits --
         # NOT the other way round. A 1x1 conv mixes channels per pixel and
@@ -248,6 +261,17 @@ class SingleBranchSegmentationModel(nn.Module):
             skip2=features["s1"],
             output_size=x.shape[2:],
             return_ig=return_ig,
+        )
+
+    def decode_features(self, x: torch.Tensor) -> torch.Tensor:
+        """Decoder features at 1/4 resolution, i.e. what `decoder.head`
+        classifies per pixel (see LightweightSegmentationDecoder.decode_features)."""
+        features = self.encoder(x)
+        return self.decoder.decode_features(
+            bottleneck=features["s4"],
+            skip8=features["s3"],
+            skip4=features["s2"],
+            skip2=features["s1"],
         )
 
 

@@ -258,6 +258,41 @@ HetSNGP components alone: GP variance AUROC 0.682 (informative, distance-aware),
 - Lovász-softmax loss (direct mIoU surrogate) for the rare classes.
 - With the planetary scientists: definitions / possible merging of the near-zero classes; a small expert-labelled val set to measure true accuracy and NOAH-H's own agreement.
 
+## 7b. Stage 4 — block-level fine-tuning on the expert labels (prepared 2026-10-12, labels pending)
+Decision 2026-10-12: no extra seeds of the full / lean hybrid. They would only put error bars on E10/E11 (0.2072 vs 0.2055, a 0.0017 gap that two more seeds per arm could not resolve), so the choice between the two is made on cost.
+
+The planetary scientists label whole 512 × 512 blocks with **one class each**: the 14 NOAH-H DC classes plus **4 new classes**. Plan: fine-tune the E10 segmenter (`checkpoints/arch_ablation_no_lovasz/best_16ep.pt`, EMA weights) into a block classifier.
+- **Head** (`vision_backend/model/block_head.py`): logit_k = α·prior_k + b_k + w_k·[LN(z), p̄].
+  - prior_k = log of the segmenter's mean probability of class k over the block's valid pixels (0 for a new class).
+  - p̄ = the block's predicted class composition, so a new class can be learned as a mixture of known ones.
+  - z = gated-attention-MIL pooling of the decoder features (Ilse et al. 2018), so a class defined by a small conspicuous feature is not averaged away.
+  - At init (α = 1, w = 0) the head **is** the dominant-class rule: epoch 0 is a zero-shot baseline on the NOAH-H classes.
+- **Schedule** (`vision_backend/train_stage4_block_finetune.py`):
+  - LP-FT (Kumar et al. 2022): head-only epochs on the frozen segmenter, then all weights.
+  - The head uses AdamW at 1e-3. The segmenter uses the Stage-3 routed Muon/NAdamW at 0.1× the tuned LRs, built only at unfreeze: Muon zero-fills missing gradients and still applies weight decay, so it must never hold frozen weights.
+  - Class-weighted CE (inverse-sqrt); model selection on val macro-F1.
+  - Reported: accuracy, balanced accuracy and macro-F1 overall, for NOAH-H classes and for new classes; NLL; ECE; confusion matrix.
+- **Data** (`vision_backend/block_dataset.py`):
+  - Manifest CSV with `label`, `split`, and either `col,row` (mosaic) or `image` (tile file).
+  - NOAH-H names are matched case/spacing-insensitively; anything else is a new class.
+  - `--expect-new-classes 4` fails the run if a misspelt NOAH-H name shows up as a fifth "new" class.
+  - **Split spatially** (by region / HiRISE image), not by random block.
+- Tests: `vision_backend/tests/test_block_head.py`, 12 tests:
+  - init ≡ the dominant-class rule; nodata excluded;
+  - the new-class path learns; 1024 blocks tiled at 512;
+  - size-grouped batches; manifest and fixed class list; dataset; checkpoint round trip; metrics;
+  - an end-to-end `main()` run with the Muon/NAdamW unfreeze.
+
+**Campaign 1 data** (`data/BlockLabels/MarsLabelling`, mars-labeler exports, `label_origin: labeling_session`) → `scripts/prep_expert_block_manifest.py` → `data/BlockLabels_prepared/`:
+- **ESP_075512_1900** (512 blocks, 2 260 labels): used.
+- **ESP_027201_1750** (1024 blocks, 1 196 labels; the only Dunes/Yardangs): **excluded**. Its 1024 block size was not intended for this campaign (user, 2026-10-12).
+- **Class mapping by the export's `model_index`**: 0–13 = NOAH-H DC 1–14 in order, plus new classes Craters, Yardangs, Dunes and Periodic Bedrock Ridges. `block_classes.json` fixes all 18 outputs across campaigns. In this campaign, Craters (288) and Periodic Bedrock Ridges (4) are the only new classes present.
+- **Contrast**: the export's 1–99 % stretch to 0–255 has about 2× the Oxia contrast (std 48 vs 25). The observation's p1/p99 are instead mapped onto the Oxia training p1/p99 (58/178), giving mean 119.6 and std 22.3 (Oxia: 119.3, 24.9). Raw 0 = nodata. All 2 260 crops match their SHA-256.
+- **Split**: spatial, 1 km cells. Of 300 random cell assignments, the one covering the most classes is kept. Result: train 1 337 (59 %), val 338 (15 %), test 355 (16 %), and a buffer of 230 train blocks touching val/test.
+  - Rare classes are near-unmeasurable: Smooth non-bedrock 1/0/0, Fractured bedrock 3/1/0, Periodic Bedrock Ridges 2/1/1, Boulder Fields 6/2/3.
+  - So model selection uses val macro-F1 over the classes with ≥ 5 val blocks (`macro_f1_sel`).
+- Run 1, `experts_v1_plain` (cluster 17696189): plain LP-FT, 30 epochs (2 probe), E10 segmenter. This is the baseline for the Laplace-prior version planned next.
+
 ## 8. Where things are
 | | |
 |---|---|
