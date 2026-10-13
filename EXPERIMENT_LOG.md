@@ -383,6 +383,60 @@ All runs use seed 42 and the E13 recipe, except the seed control `plain_s43`. Δ
 - **The knee is between τ 65 and 650.** Above it the prior holds the network too close to NOAH-H, and expert accuracy pays about 0.03–0.07 (4–7× the seed spread). At τ 6500 forgetting is practically zero.
 - **Decision: τ = 65 is the default.** It halves forgetting at no measurable expert cost. Somewhere around 200 may still be free; that's the fine adjustment if retaining NOAH-H matters more.
 
+### E16 — Using the 1024 labels; tuning by spatial CV (2026-10-13, clusters 17697567–17697575; running)
+The ESP_027201 session (1 196 blocks of 1024 × 1024) is used after all: the user asked not to waste it.
+- **Whole blocks**: the backbone sees four 512 tiles at the native 0.25 m, and the head pools over the whole labelled area. The label then applies exactly to what it describes.
+- **Downsampling to 512 (0.5 m) was not pursued**: it halves the resolution the segmenter was trained at, and the finest textures (small ripples) would largely be lost.
+- **Dividing** into four 512 quarters with the parent's label is tested as an ablation (`v2q`). It adds label noise wherever the majority class is not in a quarter (e.g. a single crater).
+
+Data:
+- `data/BlockLabels_prepared_v2` (`--block-sizes 512 1024 --keep-splits-from data/BlockLabels_prepared/manifest.csv --cv-folds 3`).
+  - **ESP_075512 keeps its E13–E15 split exactly**, so its test blocks stay comparable.
+  - ESP_027201 gets its own spatial split: train 673, val 188, test 176, buffer 159.
+  - New / grown classes:
+    - Dunes: 174 blocks, Yardangs: 6 (both new);
+    - Craters: +137, Non-bedrock smooth: +37, Fractured bedrock: +33, Periodic Bedrock Ridges: +28.
+  - Contrast-matched mean / std: 102 / 26.7 (Oxia 119 / 24.9).
+- `data/BlockLabels_prepared_v2q`: the same, with ESP_027201's *training* blocks quartered (2 692 quarters). Val and test stay whole, so both variants are scored on identical test blocks.
+
+Runs (all with the τ 65 prior):
+- `v2_bags_t65` vs `v2q_quarters_t65`.
+- The E15 τ 65 model (trained on ESP_075512 only) scored on the v2 test set (`eval_v2`). This is the **first cross-site number**: ESP_027201 test blocks are an observation it never saw.
+- **Tuning**: 3-fold spatial CV over train+val of v2.
+  - Whole cells per fold; blocks bordering the held-out fold are dropped from its training.
+  - Each fold is scored at its last epoch (`--select last`); the test split is never read.
+  - Grid: segmenter LR ×0.3 / ×1 / ×3 (of the E13 recipe) × 12 / 24 epochs; τ 65, head LR 1e-3.
+  - `results/block_cv/<config>.json`.
+  - The winner is refit on all of train+val and evaluated on test once.
+
+**Cross-site result (`results/block_finetune/laplace_all_t65.eval_v2.json`)**: the E15 τ 65 model, trained on ESP_075512 only.
+
+| test observation | blocks | accuracy [95 % CI] | macro-F1 ≥ 5 | NLL |
+|---|---|---|---|---|
+| ESP_075512 (own image) | 355 | 0.654 [0.49, 0.80] | 0.452 | 1.07 |
+| **ESP_027201 (never seen)** | 176 | **0.381 [0.21, 0.54]** | 0.299 | 1.99 |
+
+- Dunes (27 of the 176) are a class it never saw, so at most about 0.85 was reachable. Most of the 0.27 drop is still a real site gap.
+- **A model fine-tuned on one observation does not transfer to another**, which is the honest answer to "did we overfit the sample". Spatially separated test cells within one image overstate generalization to new sites.
+
+**Whole 1024 blocks vs quarters** (clusters 17697567/8; `results/block_finetune/e16_v2_paired.json`). τ 65, E13 recipe, identical v2 test blocks (531):
+
+| | ESP_075512 only (cross-site) | **v2 whole blocks** | v2 quarters |
+|---|---|---|---|
+| ESP_027201 test acc (176) | 0.381 | **0.682** [0.54, 0.82] | 0.676 |
+| ESP_075512 test acc (355) | 0.654 | 0.654 | 0.685 |
+| pooled acc, Δ vs cross-site | — | +0.100 [0.000, +0.241] | **+0.119 [+0.020, +0.252]** |
+| pooled macro-F1 ≥ 5, Δ | — | **+0.133 [+0.014, +0.275]** | **+0.130 [+0.014, +0.260]** |
+| pooled macro-F1, all present classes | 0.224 | **0.416** | 0.369 |
+| NOAH-H val mIoU (0.2072 before) | 0.1989 | 0.1949 | 0.1808 |
+
+- **The 1024 labels are worth a lot either way.** ESP_027201 test accuracy goes 0.38 → 0.68. Dunes reach F1 0.91, Craters 0.74 / 0.80, Periodic Bedrock Ridges 0.86 (3 test blocks).
+- **They cost nothing at the original site**: ESP_075512 test accuracy is 0.654 → 0.654 (whole) / 0.685 (quarters).
+- **Whole vs quarters, paired**: Δ accuracy +0.019 [−0.010, +0.044] for quarters, Δ macro-F1 ≥ 5 −0.004 [−0.085, +0.024]. That is **no significant difference.**
+- Whole blocks do better on the rare classes (macro-F1 over all present classes 0.416 vs 0.369; Yardangs 0.67 vs 0 on 2 test blocks) and **forget less** (0.195 vs 0.181).
+- Part of the extra forgetting with quarters is a confound: the prior enters divided by N_train, which quartering doubles (4 029 vs 2 010 items), so the quarters run had an effectively half-strength prior.
+- **Decision: whole blocks.** There is no label noise and the label describes exactly the input. It is at least as good, so the expert effort is fully used without guessing which quarter holds the majority class.
+
 ## 8. Where things are
 | | |
 |---|---|

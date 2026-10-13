@@ -1,0 +1,940 @@
+{
+  "checkpoint": "checkpoints/block_finetune/v2_bags_t65/best.pt",
+  "epoch": 12,
+  "manifest": "data/BlockLabels_prepared_v2/manifest.csv",
+  "temperature": 1.7295239403284368,
+  "test_raw": {
+    "n": 531,
+    "accuracy": 0.6629001883239172,
+    "balanced_accuracy": 0.40899687678229246,
+    "macro_f1": 0.41615166298891776,
+    "macro_f1_sel": 0.43869166165155443,
+    "balanced_accuracy_noahh": 0.29682976760667135,
+    "balanced_accuracy_new": 0.7174564270152505,
+    "macro_f1_noahh": 0.29130298794709125,
+    "macro_f1_new": 0.7594855193539404,
+    "nll": 1.3175054248203117,
+    "ece": 0.1348171738132039,
+    "per_class": [
+      {
+        "name": "Smooth + Featureless",
+        "new": false,
+        "support": 2,
+        "recall": 0.0,
+        "precision": null,
+        "f1": 0.0
+      },
+      {
+        "name": "Smooth + Lineated",
+        "new": false,
+        "support": 0,
+        "recall": null,
+        "precision": null,
+        "f1": null
+      },
+      {
+        "name": "Textured non-bedrock",
+        "new": false,
+        "support": 0,
+        "recall": null,
+        "precision": null,
+        "f1": null
+      },
+      {
+        "name": "Smooth bedrock",
+        "new": false,
+        "support": 7,
+        "recall": 0.0,
+        "precision": null,
+        "f1": 0.0
+      },
+      {
+        "name": "Textured bedrock",
+        "new": false,
+        "support": 63,
+        "recall": 0.5396825396825397,
+        "precision": 0.4146341463414634,
+        "f1": 0.4689655172413793
+      },
+      {
+        "name": "Rugged bedrock",
+        "new": false,
+        "support": 177,
+        "recall": 0.8983050847457628,
+        "precision": 0.775609756097561,
+        "f1": 0.8324607329842932
+      },
+      {
+        "name": "Fractured bedrock",
+        "new": false,
+        "support": 5,
+        "recall": 0.6,
+        "precision": 0.75,
+        "f1": 0.6666666666666666
+      },
+      {
+        "name": "Continous + Simple form large ripples",
+        "new": false,
+        "support": 4,
+        "recall": 0.0,
+        "precision": 0.0,
+        "f1": 0.0
+      },
+      {
+        "name": "Isolated + Simple form large ripples",
+        "new": false,
+        "support": 57,
+        "recall": 0.6842105263157895,
+        "precision": 0.65,
+        "f1": 0.6666666666666666
+      },
+      {
+        "name": "Rectilinear form large ripples",
+        "new": false,
+        "support": 0,
+        "recall": null,
+        "precision": null,
+        "f1": null
+      },
+      {
+        "name": "Continuous small ripples",
+        "new": false,
+        "support": 23,
+        "recall": 0.0,
+        "precision": null,
+        "f1": 0.0
+      },
+      {
+        "name": "Bedrock substrate + Non-continuous small ripples",
+        "new": false,
+        "support": 44,
+        "recall": 0.4318181818181818,
+        "precision": 0.35185185185185186,
+        "f1": 0.3877551020408163
+      },
+      {
+        "name": "Non-bedrock substrate + Non-continous small ripples",
+        "new": false,
+        "support": 9,
+        "recall": 0.1111111111111111,
+        "precision": 0.5,
+        "f1": 0.18181818181818182
+      },
+      {
+        "name": "Boulder fields",
+        "new": false,
+        "support": 5,
+        "recall": 0.0,
+        "precision": null,
+        "f1": 0.0
+      },
+      {
+        "name": "Craters",
+        "new": true,
+        "support": 102,
+        "recall": 0.6568627450980392,
+        "precision": 0.7701149425287356,
+        "f1": 0.708994708994709
+      },
+      {
+        "name": "Yardangs",
+        "new": true,
+        "support": 2,
+        "recall": 0.5,
+        "precision": 1.0,
+        "f1": 0.6666666666666666
+      },
+      {
+        "name": "Dunes",
+        "new": true,
+        "support": 27,
+        "recall": 0.9629629629629629,
+        "precision": 0.8666666666666667,
+        "f1": 0.9122807017543859
+      },
+      {
+        "name": "Periodic Bedrock Ridges",
+        "new": true,
+        "support": 4,
+        "recall": 0.75,
+        "precision": 0.75,
+        "f1": 0.75
+      }
+    ],
+    "confusion": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        5,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        34,
+        14,
+        0,
+        0,
+        0,
+        0,
+        0,
+        6,
+        0,
+        0,
+        8,
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        10,
+        159,
+        1,
+        0,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        0,
+        1,
+        1
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        2,
+        3,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        9,
+        0,
+        2,
+        39,
+        0,
+        0,
+        6,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        1,
+        0,
+        0,
+        20,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        8,
+        5,
+        0,
+        0,
+        11,
+        0,
+        0,
+        19,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        4,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        3,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        3,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        24,
+        10,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        67,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        26,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        3
+      ]
+    ],
+    "brier": 0.5140349864959717
+  },
+  "test_calibrated": {
+    "nll": 1.1099938489959622,
+    "ece": 0.0749192595341357,
+    "brier": 0.4960081875324249
+  },
+  "val_calibrated_nll": 1.1927376797043987,
+  "test_ci95": {
+    "accuracy": [
+      0.5586,
+      0.7699
+    ],
+    "balanced_accuracy": [
+      0.3244,
+      0.4836
+    ],
+    "macro_f1": [
+      0.3186,
+      0.4805
+    ],
+    "macro_f1_sel": [
+      0.3492,
+      0.6207
+    ],
+    "nll": [
+      0.8131,
+      1.4333
+    ],
+    "ece": [
+      0.0571,
+      0.1498
+    ]
+  },
+  "same_class_set": {
+    "classes": [
+      "Bedrock substrate + Non-continuous small ripples",
+      "Continuous small ripples",
+      "Craters",
+      "Dunes",
+      "Isolated + Simple form large ripples",
+      "Non-bedrock substrate + Non-continous small ripples",
+      "Rugged bedrock",
+      "Smooth bedrock",
+      "Textured bedrock"
+    ],
+    "val_macro_f1": 0.4747161581001117,
+    "test_macro_f1": 0.462104623500048
+  },
+  "test_by_obs": {
+    "ESP_027201_1750_RED": {
+      "n": 176,
+      "accuracy": 0.6818181818181818,
+      "balanced_accuracy": 0.39718942556151854,
+      "macro_f1": 0.39396761267889047,
+      "macro_f1_sel": 0.5996282401693421,
+      "nll": 1.1614738508888693,
+      "ece": 0.15538835506904478,
+      "ci95": {
+        "accuracy": [
+          0.5446,
+          0.8195
+        ],
+        "balanced_accuracy": [
+          0.322,
+          0.496
+        ],
+        "macro_f1": [
+          0.3077,
+          0.5037
+        ],
+        "macro_f1_sel": [
+          0.4342,
+          0.7962
+        ],
+        "nll": [
+          0.7523,
+          1.5608
+        ],
+        "ece": [
+          0.0814,
+          0.2613
+        ]
+      },
+      "per_class": [
+        {
+          "name": "Smooth + Featureless",
+          "new": false,
+          "support": 2,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Smooth + Lineated",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Textured non-bedrock",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Smooth bedrock",
+          "new": false,
+          "support": 2,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Textured bedrock",
+          "new": false,
+          "support": 27,
+          "recall": 0.5925925925925926,
+          "precision": 0.48484848484848486,
+          "f1": 0.5333333333333333
+        },
+        {
+          "name": "Rugged bedrock",
+          "new": false,
+          "support": 50,
+          "recall": 0.88,
+          "precision": 0.6470588235294118,
+          "f1": 0.7457627118644068
+        },
+        {
+          "name": "Fractured bedrock",
+          "new": false,
+          "support": 5,
+          "recall": 0.6,
+          "precision": 0.75,
+          "f1": 0.6666666666666666
+        },
+        {
+          "name": "Continous + Simple form large ripples",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": 0.0,
+          "f1": null
+        },
+        {
+          "name": "Isolated + Simple form large ripples",
+          "new": false,
+          "support": 10,
+          "recall": 0.0,
+          "precision": 0.0,
+          "f1": 0.0
+        },
+        {
+          "name": "Rectilinear form large ripples",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Continuous small ripples",
+          "new": false,
+          "support": 1,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Bedrock substrate + Non-continuous small ripples",
+          "new": false,
+          "support": 2,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Non-bedrock substrate + Non-continous small ripples",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Boulder fields",
+          "new": false,
+          "support": 2,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Craters",
+          "new": true,
+          "support": 43,
+          "recall": 0.627906976744186,
+          "precision": 0.9,
+          "f1": 0.7397260273972602
+        },
+        {
+          "name": "Yardangs",
+          "new": true,
+          "support": 2,
+          "recall": 0.5,
+          "precision": 1.0,
+          "f1": 0.6666666666666666
+        },
+        {
+          "name": "Dunes",
+          "new": true,
+          "support": 27,
+          "recall": 0.9629629629629629,
+          "precision": 0.8666666666666667,
+          "f1": 0.9122807017543859
+        },
+        {
+          "name": "Periodic Bedrock Ridges",
+          "new": true,
+          "support": 3,
+          "recall": 1.0,
+          "precision": 0.75,
+          "f1": 0.8571428571428571
+        }
+      ]
+    },
+    "ESP_075512_1900_RED": {
+      "n": 355,
+      "accuracy": 0.6535211267605634,
+      "balanced_accuracy": 0.31606883729574126,
+      "macro_f1": 0.3017572521763813,
+      "macro_f1_sel": 0.4149162217425242,
+      "nll": 1.0844713691842678,
+      "ece": 0.06395340556858692,
+      "ci95": {
+        "accuracy": [
+          0.507,
+          0.7857
+        ],
+        "balanced_accuracy": [
+          0.3016,
+          0.4575
+        ],
+        "macro_f1": [
+          0.2708,
+          0.4213
+        ],
+        "macro_f1_sel": [
+          0.309,
+          0.541
+        ],
+        "nll": [
+          0.7102,
+          1.5296
+        ],
+        "ece": [
+          0.0607,
+          0.1546
+        ]
+      },
+      "per_class": [
+        {
+          "name": "Smooth + Featureless",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Smooth + Lineated",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Textured non-bedrock",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Smooth bedrock",
+          "new": false,
+          "support": 5,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Textured bedrock",
+          "new": false,
+          "support": 36,
+          "recall": 0.5,
+          "precision": 0.3673469387755102,
+          "f1": 0.4235294117647059
+        },
+        {
+          "name": "Rugged bedrock",
+          "new": false,
+          "support": 127,
+          "recall": 0.905511811023622,
+          "precision": 0.8394160583941606,
+          "f1": 0.8712121212121212
+        },
+        {
+          "name": "Fractured bedrock",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Continous + Simple form large ripples",
+          "new": false,
+          "support": 4,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Isolated + Simple form large ripples",
+          "new": false,
+          "support": 47,
+          "recall": 0.8297872340425532,
+          "precision": 0.6964285714285714,
+          "f1": 0.7572815533980582
+        },
+        {
+          "name": "Rectilinear form large ripples",
+          "new": false,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Continuous small ripples",
+          "new": false,
+          "support": 22,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Bedrock substrate + Non-continuous small ripples",
+          "new": false,
+          "support": 42,
+          "recall": 0.4523809523809524,
+          "precision": 0.35185185185185186,
+          "f1": 0.3958333333333333
+        },
+        {
+          "name": "Non-bedrock substrate + Non-continous small ripples",
+          "new": false,
+          "support": 9,
+          "recall": 0.1111111111111111,
+          "precision": 0.5,
+          "f1": 0.18181818181818182
+        },
+        {
+          "name": "Boulder fields",
+          "new": false,
+          "support": 3,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        },
+        {
+          "name": "Craters",
+          "new": true,
+          "support": 59,
+          "recall": 0.6779661016949152,
+          "precision": 0.7017543859649122,
+          "f1": 0.6896551724137931
+        },
+        {
+          "name": "Yardangs",
+          "new": true,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Dunes",
+          "new": true,
+          "support": 0,
+          "recall": null,
+          "precision": null,
+          "f1": null
+        },
+        {
+          "name": "Periodic Bedrock Ridges",
+          "new": true,
+          "support": 1,
+          "recall": 0.0,
+          "precision": null,
+          "f1": 0.0
+        }
+      ]
+    }
+  },
+  "noahh_val_miou": 0.19490633931687548
+}
