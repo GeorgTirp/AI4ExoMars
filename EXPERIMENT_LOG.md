@@ -437,6 +437,22 @@ Runs (all with the τ 65 prior):
 - Part of the extra forgetting with quarters is a confound: the prior enters divided by N_train, which quartering doubles (4 029 vs 2 010 items), so the quarters run had an effectively half-strength prior.
 - **Decision: whole blocks.** There is no label noise and the label describes exactly the input. It is at least as good, so the expert effort is fully used without guessing which quarter holds the majority class.
 
+**Tuning by 3-fold spatial CV** (clusters 17697570–575, `results/block_cv/`). Last-epoch scores, mean over folds (fold sd: accuracy ≈ 0.02, macro-F1 ≥ 5 ≈ 0.04–0.06):
+
+| segmenter LR | epochs | acc | macro-F1 | macro-F1 ≥ 5 | NLL (raw) | ECE (raw) |
+|---|---|---|---|---|---|---|
+| ×0.3 | 12 | 0.651 | 0.401 | 0.453 | 1.162 | 0.105 |
+| ×0.3 | 24 | 0.655 | 0.416 | 0.474 | 1.328 | 0.147 |
+| ×1 | 12 | 0.658 | 0.413 | 0.466 | 1.160 | 0.116 |
+| ×1 | 24 | 0.653 | 0.421 | 0.474 | 1.363 | 0.166 |
+| **×3** | **12** | **0.658** | **0.426** | **0.482** | **1.143** | 0.122 |
+| ×3 | 24 | 0.654 | 0.426 | 0.480 | 1.339 | 0.172 |
+
+- **Plateau**: no configuration beats the E13-like reference (×1, 24 epochs) consistently across the 3 folds by more than ≈ 0.01 in accuracy or macro-F1. All differences are ≤ 0.02, inside fold noise. Within this range the Stage-4 hyperparameters do not matter for accuracy.
+- **The one robust effect**: 12 epochs give a lower raw NLL in every fold (−0.18 … −0.27). Longer training only makes the model more overconfident. Temperature scaling removes most of this, but 12 epochs also halve the cost.
+- **Choice**: segmenter LR ×3, 12 epochs, last epoch (`v2_final_lr3_e12`, cluster 17697781). Best mean macro-F1 and NLL at half the training cost; the LR itself is marginal.
+  - Refit on the train split (val kept as the calibration set) and scored on test once.
+
 ## 8. Where things are
 | | |
 |---|---|
