@@ -1,8 +1,19 @@
-# AI4ExoMars — Stage-3 segmentation experiment log
+# AI4ExoMars — experiment log (Stage-3 segmentation, Stage-4 expert block labels)
 
-Banked results of the model-design experiments run 2026-09-28 … 2026-10-02 on
-the Oxia Planum NOAH-H mosaic. Every number below is reproducible from the
-checkpoints, logs and result files listed in each section.
+Banked results of the experiments run 2026-09-28 … 2026-10-13:
+- **Stage 3 (E1–E12)**: segmentation architecture, recipe and tuning on the Oxia Planum NOAH-H mosaic.
+- **Stage 4 (E13–E16)**: block-level fine-tuning on the planetary scientists' labels.
+
+Every number below is reproducible from the checkpoints, logs and result files listed in each section. The Stage-1 pretraining runs of May 2026 (`results/stage1_training`, `results/tune_stage1*`) predate this log and are not covered.
+
+## 0. Current models (2026-10-13)
+
+| | checkpoint | recipe | result |
+|---|---|---|---|
+| **Stage-3 segmenter** | `checkpoints/arch_ablation_no_lovasz/best_16ep.pt` (EMA weights) | HybridEncoder from scratch; Muon on transformer matrices + NAdamW at f1qeno3u's LRs/WDs; drop-path 0.087; no Lovász; 16 epochs (E10) | NOAH-H val mIoU **0.2072** |
+| lean Stage-3 alternative | `checkpoints/arch_ablation_no_global_s3_depth2/best_16ep.pt` | as above, no global attention, 1/16 Swin depth 2 (E11) | 0.2055 at −23 % params, −25 % training time |
+| **Laplace prior** (campaign 0) | `checkpoints/laplace/noahh_prior_e10.pt` | diagonal MC Fisher of the Stage-3 segmenter on 2 000 NOAH-H crops (E14) | used at τ = 64.5 (E15) |
+| **Stage-4 block classifier** | `checkpoints/block_finetune/v2_final_lr3_e12/best.pt` | Stage-3 segmenter + MIL block head; LP-FT with 2 probe epochs; τ 64.5 prior; segmenter LR ×3 (Muon 5.16e-5, NAdamW 1.824e-5); 12 epochs, last epoch; both observations, whole 1024 blocks (E16) | test accuracy **0.682** [0.58, 0.79]; ECE 0.063 after temperature scaling (T* = 1.61, in `eval.json`); NOAH-H mIoU 0.196 |
 
 ## 1. Common setup (unless a section says otherwise)
 
@@ -229,9 +240,16 @@ HetSNGP components alone: GP variance AUROC 0.682 (informative, distance-aware),
 
 | change | Δ mIoU | |
 |---|---|---|
-| **SimMIM hybrid vs best ConvNeXt-Swin** | **+0.023** | only effect clearly above noise |
+| **SimMIM hybrid vs best ConvNeXt-Swin** | **+0.023** | only effect clearly above noise; still **+0.019** under the same tuned recipe (E12) |
 | Muon on transformer matrices | +0.003 peak, ~2× faster | overfits after ep 16 |
 | 16-ep Muon + Lovász + drop-path (sweep best, 10 trials) | +0.006 vs E4 | 0.2060, ~half the compute; plateau |
+| drop-path removed (E10) | **−0.007** | the only recipe component above noise; without it the model overfits |
+| Lovász removed (E10) | +0.001 | 15 % faster; retired |
+| tuned recipe on ConvNeXt-Swin v0 (E12) | +0.007 … +0.011 | the recipe helps both encoders about equally |
+| global attention at 1/32 → Swin (E9) | −0.002 | |
+| 1/16 Swin depth 6 → 2 (E9) | −0.003 | −22 % params, −19 % time |
+| both removed (E11) | −0.002 | −23 % params, −25 % time |
+| flip TTA / top-3 ensemble (E8) | +0.0007 / +0.0017 | ECE −13 % with the ensemble |
 | HetSNGP head | +0.0004 | no accuracy change; worse raw calibration |
 | width +9 M params (small → big) | +0.004 / +0.0005 | without / with context |
 | context branch (FiLM) | +0.0004 / +0.0035 | big / small |
@@ -240,25 +258,29 @@ HetSNGP components alone: GP variance AUROC 0.682 (informative, distance-aware),
 | short SimMIM pretraining | −0.007 | |
 
 1. **Allocation beats parameter count.** The hybrid has 10 % more params than v0 but +0.023; +9 M params of width gave +0.004.
-2. **Depth of within-crop mixing beats a wider view.** Context branch, cross-attention context and the 1024 window all moved mIoU by ≤ 0.007. The hybrid's lead is on pattern-defined classes (rectilinear ripples 0.02–0.055 → 0.16–0.20, isolated simple-form ripples, fractured/textured bedrock) — consistent with its 6 Swin blocks at 1/16 plus global attention at 1/32 (whole-crop receptive field). Which of these drives the gain is not yet isolated.
+2. **A wider view does not help, and the hybrid's lead is in its convolutional front end.** Context branch, cross-attention context and the 1024 window all moved mIoU by ≤ 0.007. The hybrid's lead is on pattern-defined classes (rectilinear ripples 0.02–0.055 → 0.16–0.20, isolated simple-form ripples, fractured/textured bedrock).
+   - It was first attributed to the 6 Swin blocks at 1/16 plus global attention at 1/32. E9 and E11 removed both at no measurable cost.
+   - E12 kept the lead under the same recipe. So the advantage sits in the ConvNeXt-V2 (GRN) stages at 1/4 and 1/8, the 4×4 stem and the wider early channels. Which of these matters is not isolated.
 3. **Fine detail is not the bottleneck** — the hybrid has no 1/2-resolution features.
 4. **Context trades classes**: helps ripple subtypes and textured bedrock, hurts the smooth classes (v3 vs v2: Smooth + Lineated −0.035, Continuous simple-form ripples −0.032); net ≈ 0.
-5. **Architecture-independent failures**: Smooth bedrock, both Non-continuous small-ripple classes, Smooth + Lineated stay at 0–0.13 in every model.
+5. **Architecture-independent failures**: Smooth bedrock, both Non-continuous small-ripple classes, Smooth + Lineated stay at 0–0.13 in every model. Lovász (E7, E10) and ensembling (E8) did not lift them either.
+6. **The recipe is on a plateau.** The top three of 10 tuning trials lie within 0.0023, inside the ±0.004 seed noise (E7). 16 epochs with Muon beat 30 with NAdamW by 0.006 at half the compute. Drop-path is the one component that matters (E10). In hyperband sweeps, use min_iter ≥ 8: min_iter 5 favoured fast starters.
+7. **The labels cap the metric.** Train mIoU is only ~0.30 at epoch 16 (val 0.20, E9), and the labels are NOAH-H's own predictions (§6). This is why Stage 4 moved to expert labels.
 
 ## 6. Label and data notes (for the achievable ceiling)
 - Labels are NOAH-H **predictions**, so mIoU measures agreement with NOAH-H, including its errors; a model that is more correct geologically can score lower.
 - Registration DRG ↔ labels: no resolvable offset (separability and edge-energy surfaces flat over ±24 px); residual estimated at a few px (~1 m) — `derived/alignment_report.md`.
 - Pixel-scale speckle (60 val crops, 2026-10-02): 2.1 % of pixels differ from their 5×5 majority class; 70 % of connected label regions are ≤ 4 px, but regions ≤ 25 px cover only 0.5 % of the labelled area (≤ 400 px: 3.6 %). Not a grid/tile artifact (boundaries on grid lines at chance rate).
 
-## 7. Open questions / candidate next experiments
-- Disentangle the hybrid's gain: (a) global-attention block → Swin, (b) S3 depth 6 → 2 (one run each).
-- Second seed of the scratch hybrid (noise level of 0.200).
-- Muon with a 16–18-epoch schedule (and drop-path 0.1) — same quality at ~55 % compute.
-- Cheap, no training: flip test-time augmentation and an ensemble of the SimMIM-family checkpoints.
-- Lovász-softmax loss (direct mIoU surrogate) for the rare classes.
-- With the planetary scientists: definitions / possible merging of the near-zero classes; a small expert-labelled val set to measure true accuracy and NOAH-H's own agreement.
+## 7. Stage-3 open questions (status 2026-10-13)
+- Disentangle the hybrid's gain: **done** (E9, E11, E12). Neither global attention nor S3 depth explains it; the convolutional front end does. Still open, low priority: which part of the front end (GRN stages, 4×4 stem or early widths), one ablation each.
+- Second seed of the scratch hybrid: **not run**, by decision of 2026-10-12 (§7b).
+- Muon with a 16–18-epoch schedule and drop-path ~0.1: **done** (E7, E10). It is the current recipe.
+- Flip TTA and ensembling: **done** (E8). +0.0017 mIoU; worth it only for calibration.
+- Lovász-softmax for the rare classes: **done** (E7, E10). No gain; retired.
+- Expert-labelled data with the planetary scientists: **done**. Campaign 1 arrived 2026-10-12 (Stage 4, §7b). Definitions or merging of the near-zero NOAH-H classes are still open.
 
-## 7b. Stage 4 — block-level fine-tuning on the expert labels (prepared 2026-10-12, labels pending)
+## 7b. Stage 4 — block-level fine-tuning on the expert labels (campaign-1 labels arrived 2026-10-12)
 Decision 2026-10-12: no extra seeds of the full / lean hybrid. They would only put error bars on E10/E11 (0.2072 vs 0.2055, a 0.0017 gap that two more seeds per arm could not resolve), so the choice between the two is made on cost.
 
 The planetary scientists label whole 512 × 512 blocks with **one class each**: the 14 NOAH-H DC classes plus **4 new classes**. Plan: fine-tune the E10 segmenter (`checkpoints/arch_ablation_no_lovasz/best_16ep.pt`, EMA weights) into a block classifier.
@@ -285,7 +307,7 @@ The planetary scientists label whole 512 × 512 blocks with **one class each**: 
 
 **Campaign 1 data** (`data/BlockLabels/MarsLabelling`, mars-labeler exports, `label_origin: labeling_session`) → `scripts/prep_expert_block_manifest.py` → `data/BlockLabels_prepared/`:
 - **ESP_075512_1900** (512 blocks, 2 260 labels): used.
-- **ESP_027201_1750** (1024 blocks, 1 196 labels; the only Dunes/Yardangs): **excluded**. Its 1024 block size was not intended for this campaign (user, 2026-10-12).
+- **ESP_027201_1750** (1024 blocks, 1 196 labels; the only Dunes/Yardangs): **excluded in E13–E15**. Its 1024 block size was not intended for this campaign (user, 2026-10-12). **Used from E16 on** as whole 1024 blocks, so the expert effort is not wasted (user, 2026-10-13).
 - **Class mapping by the export's `model_index`**: 0–13 = NOAH-H DC 1–14 in order, plus new classes Craters, Yardangs, Dunes and Periodic Bedrock Ridges. `block_classes.json` fixes all 18 outputs across campaigns. In this campaign, Craters (288) and Periodic Bedrock Ridges (4) are the only new classes present.
 - **Contrast**: the export's 1–99 % stretch to 0–255 has about 2× the Oxia contrast (std 48 vs 25). The observation's p1/p99 are instead mapped onto the Oxia training p1/p99 (58/178), giving mean 119.6 and std 22.3 (Oxia: 119.3, 24.9). Raw 0 = nodata. All 2 260 crops match their SHA-256.
 - **Split**: spatial, 1 km cells. Of 300 random cell assignments, the one covering the most classes is kept. Result: train 1 337 (59 %), val 338 (15 %), test 355 (16 %), and a buffer of 230 train blocks touching val/test.
@@ -368,7 +390,7 @@ All runs use seed 42 and the E13 recipe, except the seed control `plain_s43`. Δ
 - **No measurable cost on the expert task**: all Δ accuracy / F1 are within ±0.013 and inside the seed spread. Caveat: the test set can only resolve differences of roughly ±0.03–0.05.
 - **Better raw calibration** (ECE 0.256 → 0.131): the prior limits the overconfident drift. After temperature scaling all runs are similar (ECE 0.07–0.10).
 - **Encoder-only (decoder free) ≈ all at the same τ**: the protection comes from the encoder.
-- **The stability/plasticity frontier is not reached at τ = 65**; τ = 650 / 6500 would locate where expert accuracy starts to pay.
+- **The stability/plasticity frontier is not reached at τ = 65**; τ = 650 / 6500 would locate where expert accuracy starts to pay (→ E15b).
 - **Method note**: the paired bootstrap CI covers test-sampling noise only. The two plain seeds differ "significantly" in calibrated NLL (−0.061, CI excludes 0), so any decision needs effects larger than the seed spread, not just CIs that exclude 0.
 - **Val → test optimism** on the same 6 classes is 0.03–0.06 in every run (val 0.593–0.597, test 0.538–0.566). This is consistent with mild selection optimism, not a run-specific overfit.
 
@@ -383,7 +405,7 @@ All runs use seed 42 and the E13 recipe, except the seed control `plain_s43`. Δ
 - **The knee is between τ 65 and 650.** Above it the prior holds the network too close to NOAH-H, and expert accuracy pays about 0.03–0.07 (4–7× the seed spread). At τ 6500 forgetting is practically zero.
 - **Decision: τ = 65 is the default.** It halves forgetting at no measurable expert cost. Somewhere around 200 may still be free; that's the fine adjustment if retaining NOAH-H matters more.
 
-### E16 — Using the 1024 labels; tuning by spatial CV (2026-10-13, clusters 17697567–17697575; running)
+### E16 — Using the 1024 labels; tuning by spatial CV (2026-10-13, clusters 17697567–17697575, final refit 17697781)
 The ESP_027201 session (1 196 blocks of 1024 × 1024) is used after all: the user asked not to waste it.
 - **Whole blocks**: the backbone sees four 512 tiles at the native 0.25 m, and the head pools over the whole labelled area. The label then applies exactly to what it describes.
 - **Downsampling to 512 (0.5 m) was not pursued**: it halves the resolution the segmenter was trained at, and the finest textures (small ripples) would largely be lost.
@@ -470,12 +492,73 @@ Runs (all with the τ 65 prior):
   The CV verdict holds on test: same accuracy, slightly better calibrated, at 40 % of the training compute.
 - Macro-F1 over *all* present classes (0.360 vs 0.416) moves with classes that have 1–3 test blocks. It is not a reliable signal at this test size.
 
+## 7c. Stage 4 — what we learned, and what is open
+
+1. **The features transfer to new sites; NOAH-H's class mapping does not.** Zero-shot, the segmenter's dominant-class rule scores 0.018 val accuracy. A head on the frozen features reaches 0.58 after two probe epochs (E13).
+2. **Data, not hyperparameters, limits the block classifier.**
+   - Spatial CV is flat across segmenter LR ×0.3 to ×3 and 12 vs 24 epochs (differences ≤ 0.02, inside fold noise, E16).
+   - Classes with fewer than about 30 training blocks are not learned (E13).
+3. **Generalisation across observations is the real gap.**
+   - A model trained on ESP_075512 scores 0.38 on ESP_027201, against 0.65 on its own image (E16).
+   - Adding labels from the second observation lifts that site to 0.68 and costs nothing at the first.
+   - Test cells from the training image overstate generalisation to new sites.
+4. **The Laplace prior keeps NOAH-H at no measurable cost up to τ ≈ 65** (E15, E15b).
+   - At τ = 65 forgetting halves. The knee lies between 65 and 650; at 6 500 there is no forgetting but expert macro-F1 drops by 0.066.
+   - The protection comes from the encoder: an encoder-only prior at matched strength (τ 7.3 vs 6.5) gives the same result.
+   - The penalty enters divided by N_train. When the training set grows (a bigger campaign, or quartering in E16), τ must be scaled with it to keep the same strength.
+5. **Fine-tuned block classifiers are overconfident** (T* 2.24 in E13, 1.61 for the final model).
+   - The prior and shorter training (12 epochs) both reduce it.
+   - Temperature scaling on val brings test ECE to 0.06–0.10 (E14–E16).
+6. **Keep large blocks whole.**
+   - 1024 blocks run through the backbone as 512 tiles at the native 0.25 m, and the head pools over the whole block.
+   - Quartering is no better and adds label noise. Downsampling would lose the fine textures (E16).
+7. **Statistics.**
+   - One test number has a CI of about ±0.1 accuracy, so compare runs paired on the same blocks (`scripts/compare_block_runs.py`).
+   - Paired CIs cover test sampling only, so effects must also exceed the seed spread (E14, E15).
+   - Val-selection optimism is 0.03–0.06.
+8. **Site shift is not a blur effect.** The expert imagery is sharper and noisier than the Oxia DRG, but blurring it to the Oxia spectrum does not change the zero-shot collapse (E14).
+
+Open / next (none run yet):
+- **Laplace posterior.** Add the Fisher of the expert blocks at the final weights to the τ-scaled prior. This gives:
+  - the prior for campaign 2;
+  - a last-layer Laplace predictive on the block head (`fc`, 18 × 270) for uncertainty per block. Compare it with temperature scaling.
+- **Uncertainty-map and Neural-PCA files for the block model.** `fit_calibration_artifacts.sh` only handles Stage-3 pixel segmenters (14 NOAH-H classes).
+  - Block-level Neural PCA: ψ_k = `fc.weight[k]` ⊙ [LN(z), p̄] (270-dim).
+  - Block-level Mahalanobis: on z.
+  - The user does this locally with the labelling app.
+- **Next labelling campaign.**
+  - More blocks for Continuous small ripples, Discontinuous small ripples (non-bedrock), Boulder fields, Continuous large ripples, Periodic Bedrock Ridges and Yardangs.
+  - At least one new observation held out entirely as test.
+- **τ ≈ 200**, if keeping NOAH-H matters more than the last bit of expert accuracy.
+- **Full histogram matching**, the remaining site-shift hypothesis.
+- **Diagonal-plus-low-rank precision** (LR-LGF, Sliwa et al., arXiv:2410.06800) instead of the diagonal one.
+
 ## 8. Where things are
+
+**Stage 3**
 | | |
 |---|---|
-| launchers | `run_variant_sweep.{sh,sub}`, `run_pretrain_ab.{sh,sub}`, `run_muon.{sh,sub}`, `run_hetsngp.{sh,sub}` |
-| evaluation | `scripts/eval_global_miou.py` (`--tile auto`, `--json-out`), `eval_samepix.sub`, `eval_all512.sub` |
-| result rows | `results/variant_comparison/*.jsonl`, `results/pretrain_ab/*.jsonl`, `results/muon/*.jsonl`, `results/eval/*.json` |
-| checkpoints | `checkpoints/variant_v{0,1,2,3,3_xattn,2_1024}/best_30ep_<run>.pt`, `checkpoints/pretrain_ab_{scratch,pretrained}/`, `checkpoints/muon_transformer_scratch/`, `checkpoints/hetsngp_scratch/` |
+| launchers | `run_variant_sweep.{sh,sub}`, `run_pretrain_ab.{sh,sub}`, `run_muon.{sh,sub}`, `run_hetsngp.{sh,sub}`, `run_tune_simmim.{sh,sub}`, `run_arch_ablation.{sh,sub}`, `run_recipe_v0.{sh,sub}` |
+| evaluation | `scripts/eval_global_miou.py` (`--tile auto`, `--json-out`), `eval_samepix.sub`, `eval_all512.sub`, `eval_ensemble.sub`, `eval_uncertainty.sub` |
+| result rows | `results/variant_comparison/*.jsonl`, `results/pretrain_ab/*.jsonl`, `results/muon/*.jsonl`, `results/hetsngp/`, `results/tune_simmim/trials.jsonl`, `results/arch_ablation/*.jsonl`, `results/recipe_v0/`, `results/eval/*.json` |
+| checkpoints | `checkpoints/variant_v{0,1,2,3,3_xattn,2_1024}/best_30ep_<run>.pt`, `checkpoints/pretrain_ab_{scratch,pretrained}/`, `checkpoints/muon_transformer_scratch/`, `checkpoints/hetsngp_scratch/`, `checkpoints/tune_simmim/best_16ep_<run>.pt`, `checkpoints/arch_ablation_*/best_16ep.pt`, `checkpoints/recipe_v0/` |
 | logs | `job_outputs/variant_*/agent.<cluster>.<proc>.out`, `job_outputs/{pretrain_ab,muon,hetsngp}/` |
-| key commits | 1c5c76f (static compile, LR range, tiled eval), e5fafe8 (HetSNGP), b4e63b0 (Muon routing), 08f0c7c (Lovász, tuning sweep), df3f47c (uncertainty eval) |
+| uncertainty / Neural-PCA files for the app | `fit_calibration_artifacts.sh` → `<checkpoint>.uncertainty.pt`, `<checkpoint>.npca.pt` (Stage-3-format checkpoints only) |
+| key commits | 1c5c76f (static compile, LR range, tiled eval), e5fafe8 (HetSNGP), b4e63b0 (Muon routing), 08f0c7c (Lovász, tuning sweep), df3f47c (uncertainty eval), 3f4505d (E10/E11 ablation launcher), a500e93 (Lovász retired) |
+
+**Stage 4**
+| | |
+|---|---|
+| model and training | `vision_backend/model/block_head.py`, `vision_backend/block_dataset.py`, `vision_backend/train_stage4_block_finetune.py` (`load_block_classifier`), `vision_backend/laplace_prior.py` |
+| data preparation | `scripts/prep_expert_block_manifest.py` (labelling-app exports → manifest, contrast match, spatial split, CV folds) |
+| Laplace prior | `scripts/fit_laplace_prior.py` → `checkpoints/laplace/noahh_prior_e10.pt` (+ `.calibration.json`) |
+| evaluation | `scripts/eval_block_classifier.py` (temperature, bootstrap CIs, per observation, `--noahh-eval`), `scripts/compare_block_runs.py` (paired), `scripts/diag_site_shift.py` |
+| cluster launchers | `run_block_finetune.{sh,sub}`, `run_block_eval.{sh,sub}`, `run_block_cv.{sh,sub}`, `run_stage4_diag.{sh,sub}` |
+| data | `data/BlockLabels/MarsLabelling/` (exports), `data/BlockLabels_prepared/` (v1, ESP_075512), `data/BlockLabels_prepared_v2/` (both observations, current), `data/BlockLabels_prepared_v2q/` (quartered ablation) |
+| results | `results/block_finetune/*.json`, `results/block_cv/<config>.json` |
+| checkpoints | `checkpoints/block_finetune/<run>/{best.pt, eval.json, eval_preds.npz, metrics.json}`, `checkpoints/laplace/` |
+| logs | `job_outputs/block_finetune/`, `job_outputs/block_cv/`, wandb `ai4exomars_block_finetune` |
+| tests | `vision_backend/tests/test_block_head.py`, `test_laplace_prior.py`, `test_prep_expert_blocks.py` |
+| key commits | 55a165a (Stage 4), c88cae5 (calibration eval, Laplace prior), a0e3497 (1024 blocks, spatial CV) |
+
+**Running the final model off the cluster**: the pushed repo code plus `best.pt` is all that is needed (`eval.json` holds T*). Call `load_block_classifier(path, device="cpu")`. This was checked on 2026-10-13 from a clean clone of 3e2cc21 with no GPU and no cluster files. On the login-node CPU, a 512 block took 11 s and a 1024 block 40 s. The `run_*.{sh,sub}` launchers are cluster-only.
