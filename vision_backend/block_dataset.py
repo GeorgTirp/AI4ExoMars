@@ -45,6 +45,10 @@ class BlockRecord:
     row: Optional[int] = None
     image: Optional[str] = None
     block_id: str = ""
+    # spatial cross-validation (prep_expert_block_manifest.py --cv-folds): this
+    # block's fold, and the folds whose held-out blocks it borders
+    fold: Optional[int] = None
+    cv_buffer: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,6 +133,8 @@ def load_block_manifest(
             row=int(r["row"]) if image is None else None,
             image=image,
             block_id=(r.get("block_id") or str(i)).strip(),
+            fold=int(r["fold"]) if (r.get("fold") or "").strip() else None,
+            cv_buffer=tuple(int(f) for f in (r.get("cv_buffer") or "").split(";") if f.strip()),
         ))
     return records, classes
 

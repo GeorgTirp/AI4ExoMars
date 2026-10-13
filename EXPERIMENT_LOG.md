@@ -372,6 +372,17 @@ All runs use seed 42 and the E13 recipe, except the seed control `plain_s43`. Δ
 - **Method note**: the paired bootstrap CI covers test-sampling noise only. The two plain seeds differ "significantly" in calibrated NLL (−0.061, CI excludes 0), so any decision needs effects larger than the seed spread, not just CIs that exclude 0.
 - **Val → test optimism** on the same 6 classes is 0.03–0.06 in every run (val 0.593–0.597, test 0.538–0.566). This is consistent with mild selection optimism, not a run-specific overfit.
 
+**E15b — the stability/plasticity frontier** (clusters 17697472/3, `results/block_finetune/e15b_tau_frontier.json`). Paired vs E13:
+
+| τ | NOAH-H val mIoU | forgetting | Δ test acc [95 % CI] | Δ macro-F1 ≥ 5 [95 % CI] | val `macro_f1_sel` |
+|---|---|---|---|---|---|
+| 65 | 0.1989 | −0.0083 | −0.003 [−0.055, +0.046] | +0.013 [−0.060, +0.062] | 0.595 |
+| 650 | 0.2045 | −0.0027 | **−0.037 [−0.066, −0.006]** | **−0.031 [−0.093, −0.011]** | 0.551 |
+| 6500 | 0.2067 | −0.0005 | −0.034 [−0.071, 0.000] | **−0.066 [−0.114, −0.023]** | 0.517 |
+
+- **The knee is between τ 65 and 650.** Above it the prior holds the network too close to NOAH-H, and expert accuracy pays about 0.03–0.07 (4–7× the seed spread). At τ 6500 forgetting is practically zero.
+- **Decision: τ = 65 is the default.** It halves forgetting at no measurable expert cost. Somewhere around 200 may still be free; that's the fine adjustment if retaining NOAH-H matters more.
+
 ## 8. Where things are
 | | |
 |---|---|

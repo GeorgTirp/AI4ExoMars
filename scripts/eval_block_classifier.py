@@ -130,7 +130,7 @@ def main() -> None:
     zt, yt, gt = preds["test"]
     T = fit_temperature(zv, yv)
     # per-block predictions, for paired comparisons between runs (scripts/compare_block_runs.py)
-    np.savez(out_path.with_name("eval_preds.npz"), temperature=T,
+    np.savez(out_path.with_name(f"{out_path.stem}_preds.npz"), temperature=T,
              **{f"{s}_{k}": v for s, (z, y, g) in preds.items() for k, v in (("logits", z), ("labels", y), ("cells", g))})
     raw = summarize(zt, yt, classes, min_support=args.min_support)
     cal = summarize(zt / T, yt, classes, min_support=args.min_support)
@@ -147,7 +147,24 @@ def main() -> None:
     out["same_class_set"] = {"classes": sorted(classes.names[k] for k in keep),
                              "val_macro_f1": same_class_f1(val, keep), "test_macro_f1": same_class_f1(raw, keep)}
 
+    # Per observation (cell ids are "<obs>:<cx>:<cy>"): with several HiRISE
+    # observations a pooled number hides a site the model does not transfer to.
+    obs = np.array([c.split(":")[0] for c in gt])
+    if len(set(obs)) > 1:
+        out["test_by_obs"] = {}
+        for o in sorted(set(obs)):
+            m = obs == o
+            r = summarize(zt[m] / T, yt[m], classes, min_support=args.min_support)
+            ci = bootstrap_ci(zt[m] / T, yt[m], gt[m], classes, n_boot=max(200, args.n_boot // 4), seed=0,
+                              min_support=args.min_support)
+            out["test_by_obs"][o] = {k: r[k] for k in ("n", "accuracy", "balanced_accuracy", "macro_f1",
+                                                       "macro_f1_sel", "nll", "ece")} | {"ci95": ci,
+                                                                                        "per_class": r["per_class"]}
+
     print(f"checkpoint {ckpt_path} (epoch {ckpt.get('epoch')}), temperature T* = {T:.3f} (fitted on val)")
+    for o, r in out.get("test_by_obs", {}).items():
+        print(f"  test {o} (n={r['n']}): acc {r['accuracy']:.4f} {r['ci95']['accuracy']}  "
+              f"macro-F1(>= {args.min_support}) {r['macro_f1_sel']:.4f}  NLL {r['nll']:.3f}  ECE {r['ece']:.3f}")
     print(f"test: acc {raw['accuracy']:.4f} {out['test_ci95']['accuracy']}  macro-F1 {raw['macro_f1']:.4f} "
           f"{out['test_ci95']['macro_f1']}  macro-F1(>= {args.min_support}) {raw['macro_f1_sel']:.4f} "
           f"{out['test_ci95']['macro_f1_sel']}")

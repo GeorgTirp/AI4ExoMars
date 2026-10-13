@@ -107,6 +107,11 @@ def parse_args() -> argparse.Namespace:
                    help="Prior strength: effective number of NOAH-H images (precision = tau * F_img).")
     p.add_argument("--laplace-scope", choices=("all", "encoder"), default="all",
                    help="encoder: no prior on the decoder / segmentation head.")
+    p.add_argument("--cv-fold", type=int, default=None,
+                   help="Spatial cross-validation (manifest from --cv-folds): train on the other folds of "
+                        "train+val, validate on this one; the test split is not read.")
+    p.add_argument("--select", choices=("best", "last"), default="best",
+                   help="best: checkpoint at the best val epoch; last: the final epoch (unbiased CV scores).")
     p.add_argument("--select-min-support", type=int, default=5,
                    help="Model selection: val macro-F1 over classes with at least this many val blocks.")
     add_wandb_arguments(p)
@@ -219,6 +224,20 @@ def make_loader(dataset, *, batch_size, shuffle, num_workers, base):
                       pin_memory=torch.cuda.is_available(), persistent_workers=num_workers > 0)
 
 
+def cv_splits(records, fold: int) -> dict:
+    """Spatial CV: the train+val blocks of the other folds train (minus those
+    bordering a held-out block), fold `fold` validates; test is never used."""
+    pool = [r for r in records if r.split in ("train", "val") and r.fold is not None]
+    if not pool:
+        raise SystemExit("--cv-fold needs a manifest with fold columns (prep_expert_block_manifest.py --cv-folds)")
+    splits = {"train": [r for r in pool if r.fold != fold and fold not in r.cv_buffer],
+              "val": [r for r in pool if r.fold == fold], "test": []}
+    print(f"[stage4] cross-validation fold {fold}: train {len(splits['train'])}, held out "
+          f"{len(splits['val'])}, dropped {len(pool) - len(splits['train']) - len(splits['val'])} "
+          "bordering blocks; test not read")
+    return splits
+
+
 def set_segmenter_trainable(model: BlockClassifier, trainable: bool) -> None:
     for p in model.seg.parameters():
         p.requires_grad_(trainable)
@@ -245,7 +264,10 @@ def main() -> None:
         new = [n for n, s in zip(classes.names, classes.seg_index) if s is None]
         raise SystemExit(f"Expected {args.expect_new_classes} new classes, the labels give "
                          f"{classes.num_new}: {new} -- check the NOAH-H class spellings.")
-    splits = {s: [r for r in records if r.split == s] for s in ("train", "val", "test")}
+    if args.cv_fold is None:
+        splits = {s: [r for r in records if r.split == s] for s in ("train", "val", "test")}
+    else:
+        splits = cv_splits(records, args.cv_fold)
     if not splits["val"] or (not splits["train"] and not args.eval_only):
         raise SystemExit(f"Manifest needs train and val blocks; got { {s: len(v) for s, v in splits.items()} }")
 
@@ -391,7 +413,8 @@ def main() -> None:
         # plain macro-F1, and always keep at least the first epoch's checkpoint.
         score = val["macro_f1_sel"] if math.isfinite(val["macro_f1_sel"]) else val["macro_f1"]
         score = score if math.isfinite(score) else -math.inf
-        if best_epoch == 0 or score > best_f1:
+        if (epoch == args.epochs if args.select == "last"
+                else best_epoch == 0 or score > best_f1):
             best_f1, best_epoch = score, epoch
             torch.save({"block_state": model.state_dict(),
                         "seg_model_config": seg_model_config_from(model.seg, seg_config),

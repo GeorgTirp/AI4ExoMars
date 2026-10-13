@@ -11,6 +11,7 @@ plus the NOAH-H val mIoU each run kept (eval.json, no CI).
 
     python scripts/compare_block_runs.py checkpoints/block_finetune/experts_v1_plain \
         checkpoints/block_finetune/<run> [...]
+(a run evaluated on another manifest: checkpoints/block_finetune/<run>:eval_v2)
 """
 from __future__ import annotations
 
@@ -26,9 +27,12 @@ from vision_backend.block_dataset import load_block_classes  # noqa: E402
 from vision_backend.train_stage4_block_finetune import summarize  # noqa: E402
 
 
-def load(run_dir: Path) -> dict:
-    p = np.load(run_dir / "eval_preds.npz")
-    ev = json.loads((run_dir / "eval.json").read_text())
+def load(spec: str, default_name: str = "eval") -> dict:
+    """spec = run_dir or run_dir:eval_name (e.g. checkpoints/block_finetune/x:eval_v2)."""
+    run_dir, _, name = spec.partition(":")
+    run_dir, name = Path(run_dir), name or default_name
+    p = np.load(run_dir / f"{name}_preds.npz")
+    ev = json.loads((run_dir / f"{name}.json").read_text())
     return {"z": p["test_logits"] / float(p["temperature"]), "y": p["test_labels"], "g": p["test_cells"],
             "noahh": ev.get("noahh_val_miou")}
 
@@ -41,9 +45,10 @@ def main() -> None:
     ap.add_argument("--n-boot", type=int, default=2000)
     ap.add_argument("--min-support", type=int, default=5)
     ap.add_argument("--json-out", default=None)
+    ap.add_argument("--eval-name", default="eval", help="which evaluation of each run (eval -> eval.json)")
     args = ap.parse_args()
     classes = load_block_classes(args.block_classes)
-    ref = load(Path(args.reference))
+    ref = load(args.reference, args.eval_name)
     cells = np.unique(ref["g"])
     members = {c: np.flatnonzero(ref["g"] == c) for c in cells}
     rng = np.random.default_rng(0)
@@ -60,7 +65,7 @@ def main() -> None:
           + f"  NOAH-H mIoU {ref['noahh']}")
     out = {"reference": args.reference, "reference_metrics": dict(zip(keys, base)), "runs": {}}
     for run in args.runs:
-        r = load(Path(run))
+        r = load(run, args.eval_name)
         if not (np.array_equal(r["y"], ref["y"]) and np.array_equal(r["g"], ref["g"])):
             raise SystemExit(f"{run}: test blocks differ from the reference's")
         point = np.array(metrics(r, all_idx)) - np.array(base)

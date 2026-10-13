@@ -138,11 +138,66 @@ def assign_splits(blocks: list[dict], *, fractions, cell_px: int, trials: int, s
     return [names[s] for s in best], [f"{c[0]}:{c[1]}:{c[2]}" for c in cells]
 
 
+def assign_cv_folds(blocks: list[dict], cells: list[str], *, k: int, trials: int, seed: int):
+    """Spatial k-fold assignment of whole cells (per observation, balanced in
+    size, the assignment covering the most classes in every fold), and for
+    each block the folds it borders: when fold f is held out, training blocks
+    touching a fold-f block are dropped (same buffer rule as the split)."""
+    n = len(blocks)
+    cell_keys = sorted(set(cells))
+    members = {c: np.array([i for i in range(n) if cells[i] == c]) for c in cell_keys}
+    obs_cells = {}
+    for c in cell_keys:
+        obs_cells.setdefault(c.split(":")[0], []).append(c)
+    classes = sorted({b["label"] for b in blocks})
+    cls = np.array([classes.index(b["label"]) for b in blocks])
+    frac = np.full(k, 1.0 / k)
+    rng = np.random.default_rng(seed)
+    best, best_score = None, -np.inf
+    for _ in range(trials):
+        fold = np.zeros(n, dtype=int)
+        deviation = 0.0
+        for o, oc in sorted(obs_cells.items()):
+            total = sum(len(members[c]) for c in oc)
+            counts = np.zeros(k)
+            for j in rng.permutation(len(oc)):
+                f = int(np.argmax(frac * total - counts))
+                fold[members[oc[j]]] = f
+                counts[f] += len(members[oc[j]])
+            deviation += np.abs(counts / total - frac).sum()
+        present = np.zeros((len(classes), k), dtype=bool)
+        present[cls, fold] = True
+        score = present.sum() - 10 * deviation
+        if score > best_score:
+            best, best_score = fold, score
+    pos = {(b["obs"], b["x"], b["y"]): i for i, b in enumerate(blocks)}
+    borders = []
+    for i, b in enumerate(blocks):
+        near = {int(best[pos[key]]) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx or dy)
+                and (key := (b["obs"], b["x"] + dx * b["size"], b["y"] + dy * b["size"])) in pos}
+        borders.append(sorted(near - {int(best[i])}))
+    return [int(f) for f in best], borders
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--exports", nargs="*", default=None,
                     help="Export folders (default: every dataset-* folder under data/BlockLabels).")
-    ap.add_argument("--block-size", type=int, default=512, help="Use only exports with this block size.")
+    ap.add_argument("--block-sizes", type=int, nargs="+", default=[512],
+                    help="Use only exports with these block sizes (blocks above 512 are classified whole: "
+                         "the backbone sees 512 tiles, the head pools over the whole block).")
+    ap.add_argument("--keep-splits-from", default=None,
+                    help="Earlier manifest: its blocks keep their split and cell (so test sets stay comparable "
+                         "across manifest versions); only the other blocks are assigned.")
+    ap.add_argument("--quarter-train", action="store_true",
+                    help="Ablation: TRAIN blocks above 512 are written as four 512 quarters with the parent's "
+                         "label (val/test stay whole). Default: whole blocks.")
+    ap.add_argument("--reuse-from", default=None,
+                    help="Earlier output dir with the same --stretch/--blur-sigma: whole-block crops already "
+                         "converted there are copied instead of re-converted (checksums still verified).")
+    ap.add_argument("--cv-folds", type=int, default=0,
+                    help="Also assign the train+val blocks to k spatial cross-validation folds (columns fold, "
+                         "cv_buffer) for hyperparameter tuning without touching test.")
     ap.add_argument("--out-dir", default="data/BlockLabels_prepared")
     ap.add_argument("--dc-classes-json", default=DC_CLASSES_JSON)
     ap.add_argument("--stretch", choices=("oxia", "labeler"), default="oxia")
@@ -164,12 +219,12 @@ def main() -> None:
     exports = []
     for f in folders:
         e = load_export(f)
-        if int(e["meta"]["block_size"]) != args.block_size:
-            print(f"skipping {f}: block_size {e['meta']['block_size']} != {args.block_size}")
+        if int(e["meta"]["block_size"]) not in args.block_sizes:
+            print(f"skipping {f}: block_size {e['meta']['block_size']} not in {args.block_sizes}")
             continue
         exports.append(e)
     if not exports:
-        raise SystemExit(f"no export folders with block_size {args.block_size} found")
+        raise SystemExit(f"no export folders with block_size in {args.block_sizes} found")
     for e in exports:
         if e["meta"].get("label_origin") != "labeling_session":
             raise SystemExit(f"{e['folder']}: label_origin {e['meta'].get('label_origin')!r} -- may contain "
@@ -202,8 +257,31 @@ def main() -> None:
                            "crop": e["folder"] / "crops" / r["crop_filename"],
                            "sha256": e["integrity"].get(f"crops/{r['crop_filename']}"),
                            "w": int(r["w_px"]), "h": int(r["h_px"]), "export": e})
-    splits, cells = assign_splits(blocks, fractions=args.fractions, cell_px=args.cell_px,
-                                  trials=args.trials, seed=args.seed, buffer=args.buffer)
+    kept = {}
+    if args.keep_splits_from:
+        with open(args.keep_splits_from, newline="") as fh:
+            kept = {r["block_id"]: (r["split"], r["cell"]) for r in csv.DictReader(fh)}
+    new = [i for i, b in enumerate(blocks) if b["block_id"] not in kept]
+    new_splits, new_cells = (assign_splits([blocks[i] for i in new], fractions=args.fractions,
+                                           cell_px=args.cell_px, trials=args.trials, seed=args.seed,
+                                           buffer=args.buffer) if new else ([], []))
+    kept_cells = {c for _, c in kept.values()}
+    if kept_cells & set(new_cells):
+        raise SystemExit("new blocks fall into cells of the kept split -- extending an already split "
+                         "observation needs cell-level split inheritance, not implemented")
+    assigned = dict(zip(new, zip(new_splits, new_cells)))
+    splits = [kept[b["block_id"]][0] if b["block_id"] in kept else assigned[i][0] for i, b in enumerate(blocks)]
+    cells = [kept[b["block_id"]][1] if b["block_id"] in kept else assigned[i][1] for i, b in enumerate(blocks)]
+    if kept:
+        print(f"kept the split of {len(blocks) - len(new)} blocks from {args.keep_splits_from}; "
+              f"assigned {len(new)} new blocks")
+    folds, borders = [None] * len(blocks), [[] for _ in blocks]
+    if args.cv_folds:
+        cv = [i for i, s in enumerate(splits) if s in ("train", "val")]
+        f_cv, b_cv = assign_cv_folds([blocks[i] for i in cv], [cells[i] for i in cv], k=args.cv_folds,
+                                     trials=args.trials, seed=args.seed)
+        for i, f, bd in zip(cv, f_cv, b_cv):
+            folds[i], borders[i] = f, bd
 
     missing = [b for b in blocks if not b["crop"].is_file()]
     if missing:
@@ -216,31 +294,50 @@ def main() -> None:
     # --- convert crops -----------------------------------------------------------
     out_dir = Path(args.out_dir)
     rows, stats = [], {}
-    for b, split, cell in zip(blocks, splits, cells):
+    reuse = Path(args.reuse_from) if args.reuse_from else None
+    if reuse is not None:
+        prev = json.loads((reuse / "summary.json").read_text())
+        if (prev.get("stretch"), float(prev.get("blur_sigma", 0.0))) != (args.stretch, args.blur_sigma):
+            raise SystemExit(f"--reuse-from {reuse}: converted with different --stretch/--blur-sigma")
+    for b, split, cell, fold, border in zip(blocks, splits, cells, folds, borders):
         if not b["crop"].is_file():
             continue
         if b["sha256"] is None or sha256(b["crop"]) != b["sha256"]:
             raise SystemExit(f"{b['crop']}: checksum does not match integrity.json")
-        raw = np.array(Image.open(b["crop"]))
+        S = b["size"]
+        reused = reuse / "crops" / b["obs"] / f"{b['block_id']}.png" if reuse is not None else None
+        if reused is not None and reused.is_file() and not (args.quarter_train and split == "train" and S > 512):
+            u8 = np.array(Image.open(reused))
+        else:
+            u8 = None
+        raw = np.array(Image.open(b["crop"])) if u8 is None else np.zeros((b["h"], b["w"]))
         if raw.shape != (b["h"], b["w"]):
             raise SystemExit(f"{b['crop']}: shape {raw.shape} != labels.csv {b['h']}x{b['w']}")
         S = b["size"]
         if raw.shape != (S, S):  # partial edge crop: pad right/bottom with nodata
             raw = np.pad(raw, ((0, S - raw.shape[0]), (0, S - raw.shape[1])))
-        u8 = to_uint8(raw, b["export"]["meta"].get("preprocessing", {}), args.stretch)
-        if args.blur_sigma > 0:
-            u8 = blur_valid(u8, args.blur_sigma)
-        rel = Path("crops") / b["obs"] / f"{b['block_id']}.png"
-        (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
-        Image.fromarray(u8).save(out_dir / rel)
+        if u8 is None:
+            u8 = to_uint8(raw, b["export"]["meta"].get("preprocessing", {}), args.stretch)
+            if args.blur_sigma > 0:
+                u8 = blur_valid(u8, args.blur_sigma)
+        base_row = {"label": b["label"], "split": split, "obs_id": b["obs"], "expert_class": b["expert_class"],
+                    "edit_count": b["edit_count"], "cell": cell, "fold": "" if fold is None else fold,
+                    "cv_buffer": ";".join(map(str, border)), "parent_block_id": b["block_id"]}
+        pieces = [(b["block_id"], 0, 0, S)]
+        if args.quarter_train and split == "train" and S > 512:
+            pieces = [(f"{b['block_id']}_q{r}{c}", r * 512, c * 512, 512)
+                      for r in range(S // 512) for c in range(S // 512)]
+        for block_id, r0, c0, size in pieces:
+            rel = Path("crops") / b["obs"] / f"{block_id}.png"
+            (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(np.ascontiguousarray(u8[r0:r0 + size, c0:c0 + size])).save(out_dir / rel)
+            rows.append({"image": rel.as_posix(), "block_id": block_id, "x_px": b["x"] + c0,
+                         "y_px": b["y"] + r0, "size": size, **base_row})
         v = u8[u8 > 0][::61].astype(np.float64)
         st = stats.setdefault(b["obs"], [0, 0.0, 0.0])
         st[0] += v.size
         st[1] += v.sum()
         st[2] += (v ** 2).sum()
-        rows.append({"image": rel.as_posix(), "label": b["label"], "split": split, "block_id": b["block_id"],
-                     "obs_id": b["obs"], "x_px": b["x"], "y_px": b["y"], "size": S,
-                     "expert_class": b["expert_class"], "edit_count": b["edit_count"], "cell": cell})
 
     out_dir.mkdir(parents=True, exist_ok=True)
     fixed = [{"name": c["name"], "seg_index": i} for i, c in enumerate(dc)]
@@ -265,7 +362,17 @@ def main() -> None:
         n = Counter(s for b, s in zip(blocks, splits) if b["obs"] == o)
         tot = sum(n.values())
         print(f"  {o}: " + "  ".join(f"{s} {n[s]} ({n[s] / tot:.0%})" for s in cols))
-    summary = {"stretch": args.stretch, "blur_sigma": args.blur_sigma, "oxia_p1_p99": OXIA_P1_P99, "cell_px": args.cell_px,
+    if args.cv_folds:
+        fold_table = Counter((b["expert_class"], f) for b, f in zip(blocks, folds) if f is not None)
+        print(f"\nCross-validation folds over train+val ({args.cv_folds} folds, whole cells):")
+        print(f"  {'class':<45}" + "".join(f"{'fold ' + str(f):>8}" for f in range(args.cv_folds)))
+        for c in exports[0]["classes"]:
+            counts = [fold_table[(c["name"], f)] for f in range(args.cv_folds)]
+            if any(counts):
+                print(f"  {c['name']:<45}" + "".join(f"{n:>8}" for n in counts))
+    summary = {"block_sizes": args.block_sizes, "keep_splits_from": args.keep_splits_from,
+               "quarter_train": args.quarter_train, "cv_folds": args.cv_folds,
+               "stretch": args.stretch, "blur_sigma": args.blur_sigma, "oxia_p1_p99": OXIA_P1_P99, "cell_px": args.cell_px,
                "fractions": list(args.fractions), "buffer": args.buffer, "seed": args.seed,
                "blocks_labelled": len(blocks), "blocks_in_manifest": len(rows), "missing_crops": len(missing),
                "exports": [str(e["folder"]) for e in exports],
