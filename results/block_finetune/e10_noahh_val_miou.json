@@ -1,0 +1,24 @@
+[
+ {
+  "checkpoint": "checkpoints/arch_ablation_no_lovasz/best_16ep.pt",
+  "tile": null,
+  "reported_val_miou": 0.20724267320260983,
+  "global_miou": 0.20724592518905519,
+  "global_pixel_acc": 0.634098958174928,
+  "per_class_iou": {
+   "Smooth + Featureless": 0.11522510712757067,
+   "Smooth + Lineated": 0.1344864703550247,
+   "Textured non-bedrock": 0.517461991314993,
+   "Smooth bedrock": 0.0007468879668049793,
+   "Textured bedrock": 0.0934813797518858,
+   "Rugged bedrock": 0.5604162034693373,
+   "Fractured bedrock": 0.3211639544038795,
+   "Continuous + Simple form large ripples": 0.45955041684922054,
+   "Isolated + Simple form large ripples": 0.10406701084766337,
+   "Rectilinear form large ripples": 0.18968287587901875,
+   "Continuous small ripples": 0.14536209201725359,
+   "Bedrock substrate + Non-continuous small ripples": 0.002199917503093634,
+   "Non-bedrock substrate + Non-continuous small ripples": 0.05035271997197173
+  }
+ }
+]

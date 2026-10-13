@@ -53,6 +53,19 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def blur_valid(u8: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian low-pass of the valid pixels only (normalised convolution, so
+    nodata edges do not bleed in); nodata stays 0."""
+    from scipy.ndimage import gaussian_filter
+
+    valid = u8 > 0
+    num = gaussian_filter(np.where(valid, u8, 0).astype(np.float64), sigma)
+    den = gaussian_filter(valid.astype(np.float64), sigma)
+    out = np.clip(np.rint(num / np.maximum(den, 1e-6)), 1, 255).astype(np.uint8)
+    out[~valid] = 0
+    return out
+
+
 def to_uint8(raw: np.ndarray, preprocessing: dict, stretch: str, ref=OXIA_P1_P99) -> np.ndarray:
     method = preprocessing.get("method")
     if method != "global_percentile_uint8":
@@ -133,6 +146,10 @@ def main() -> None:
     ap.add_argument("--out-dir", default="data/BlockLabels_prepared")
     ap.add_argument("--dc-classes-json", default=DC_CLASSES_JSON)
     ap.add_argument("--stretch", choices=("oxia", "labeler"), default="oxia")
+    ap.add_argument("--blur-sigma", type=float, default=0.0,
+                    help="Gaussian low-pass (px) after the stretch, to match the smoother Oxia training "
+                         "imagery (scripts/diag_site_shift.py: sigma 0.7 matches its finest-scale power "
+                         "and noise, 1.0 its mid-band power and gradient energy). 0 = off.")
     ap.add_argument("--fractions", type=float, nargs=3, default=(0.7, 0.15, 0.15), metavar=("TRAIN", "VAL", "TEST"))
     ap.add_argument("--cell-px", type=int, default=4096, help="Spatial split cell side (px; 4096 = 1 km).")
     ap.add_argument("--no-buffer", dest="buffer", action="store_false")
@@ -211,6 +228,8 @@ def main() -> None:
         if raw.shape != (S, S):  # partial edge crop: pad right/bottom with nodata
             raw = np.pad(raw, ((0, S - raw.shape[0]), (0, S - raw.shape[1])))
         u8 = to_uint8(raw, b["export"]["meta"].get("preprocessing", {}), args.stretch)
+        if args.blur_sigma > 0:
+            u8 = blur_valid(u8, args.blur_sigma)
         rel = Path("crops") / b["obs"] / f"{b['block_id']}.png"
         (out_dir / rel).parent.mkdir(parents=True, exist_ok=True)
         Image.fromarray(u8).save(out_dir / rel)
@@ -246,7 +265,7 @@ def main() -> None:
         n = Counter(s for b, s in zip(blocks, splits) if b["obs"] == o)
         tot = sum(n.values())
         print(f"  {o}: " + "  ".join(f"{s} {n[s]} ({n[s] / tot:.0%})" for s in cols))
-    summary = {"stretch": args.stretch, "oxia_p1_p99": OXIA_P1_P99, "cell_px": args.cell_px,
+    summary = {"stretch": args.stretch, "blur_sigma": args.blur_sigma, "oxia_p1_p99": OXIA_P1_P99, "cell_px": args.cell_px,
                "fractions": list(args.fractions), "buffer": args.buffer, "seed": args.seed,
                "blocks_labelled": len(blocks), "blocks_in_manifest": len(rows), "missing_crops": len(missing),
                "exports": [str(e["folder"]) for e in exports],

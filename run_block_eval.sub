@@ -1,0 +1,25 @@
+# Re-evaluate a block fine-tune (run_block_eval.sh).
+#   RUN_NAME=experts_v1_plain condor_submit_bid 20 run_block_eval.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = run_block_eval.sh
+RUN_NAME = $ENV(RUN_NAME:NOTSET)
+output = job_outputs/block_finetune/eval_$(RUN_NAME).$(Cluster).out
+error  = job_outputs/block_finetune/eval_$(RUN_NAME).$(Cluster).err
+log    = job_outputs/block_finetune/eval_$(RUN_NAME).$(Cluster).log
+request_cpus   = 8
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 40000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet")
+getenv = True
++JobBatchName = "ai4exomars-block-eval"
+MaxTime = 7200
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Block eval exited non-zero -- check the .err log"
+queue 1

@@ -42,6 +42,7 @@ try:
     from vision_backend.training.builders import build_simmim_segmentation_model, load_segmentation_model_from_checkpoint
     from vision_backend.training.utils import compute_class_weights, count_parameters, set_seed
     from vision_backend.training.wandb_utils import add_wandb_arguments, finish_wandb_run, init_wandb_run, log_metrics
+    from vision_backend.laplace_prior import DiagonalLaplacePrior
 except ModuleNotFoundError:
     from block_dataset import (DEFAULT_DC_CLASSES_JSON, BlockClasses, BlockDataset,
                                SizeGroupedBatchSampler, load_block_manifest)
@@ -50,6 +51,7 @@ except ModuleNotFoundError:
     from training.builders import build_simmim_segmentation_model, load_segmentation_model_from_checkpoint
     from training.utils import compute_class_weights, count_parameters, set_seed
     from training.wandb_utils import add_wandb_arguments, finish_wandb_run, init_wandb_run, log_metrics
+    from laplace_prior import DiagonalLaplacePrior
 
 DEFAULT_IMAGERY = "data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/drg_on_label_grid.tif"
 # HybridEncoder at the tuned recipe, seed 42 (E10 "no_lovasz", val mIoU 0.2072).
@@ -99,6 +101,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--amp-dtype", choices=("bf16", "fp32"), default="bf16")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval-only", action="store_true", help="Zero-shot evaluation of the initial model only.")
+    p.add_argument("--laplace-prior", default=None,
+                   help="Campaign-0 prior (scripts/fit_laplace_prior.py); off unless --laplace-tau > 0.")
+    p.add_argument("--laplace-tau", type=float, default=0.0,
+                   help="Prior strength: effective number of NOAH-H images (precision = tau * F_img).")
+    p.add_argument("--laplace-scope", choices=("all", "encoder"), default="all",
+                   help="encoder: no prior on the decoder / segmentation head.")
     p.add_argument("--select-min-support", type=int, default=5,
                    help="Model selection: val macro-F1 over classes with at least this many val blocks.")
     add_wandb_arguments(p)
@@ -303,8 +311,9 @@ def main() -> None:
     opt_head = head_optimizer(model, args.head_lr, args.head_weight_decay)
     total = args.epochs * steps_per_epoch
     sched_head = create_cosine_scheduler_with_warmup(opt_head, int(args.warmup_fraction * total), total)
-    opt_seg = sched_seg = None
+    opt_seg = sched_seg = laplace = None
     set_segmenter_trainable(model, False)
+    n_train = len(datasets["train"])
 
     ckpt_path = out_dir / "best.pt"
     history, best_f1, best_epoch = [], -math.inf, 0
@@ -319,11 +328,20 @@ def main() -> None:
             remaining = (args.epochs - probe_epochs) * steps_per_epoch
             sched_seg = create_cosine_scheduler_with_warmup(opt_seg, int(args.warmup_fraction * remaining), remaining)
             print(f"[stage4] epoch {epoch}: segmenter unfrozen")
+            if args.laplace_prior and args.laplace_tau > 0:
+                # The objective is sum_n CE_n + 1/2 (theta-mu)^T Lambda (theta-mu); the loss
+                # below is the mean CE, so the prior enters divided by N_train. Weight decay
+                # stays as in the plain run (at these LRs it shrinks weights by < 0.3 % over
+                # the whole run), so the prior is the only difference between the two arms.
+                laplace = DiagonalLaplacePrior(args.laplace_prior, model.seg, tau=args.laplace_tau,
+                                               scope=args.laplace_scope, device=device)
+                print(f"[stage4] Laplace prior: tau {args.laplace_tau:g}, scope {args.laplace_scope}, "
+                      f"{laplace.num_params:,} params, / N_train = {n_train}")
 
         model.train()
         if opt_seg is None:
             model.seg.eval()  # probe: deterministic features (no drop-path / dropout in the segmenter)
-        t0, loss_sum, n_seen = time.time(), 0.0, 0
+        t0, loss_sum, n_seen, pen_sum, n_steps = time.time(), 0.0, 0, 0.0, 0
         for batch in loaders["train"]:
             image = batch["image"].to(device, non_blocking=True)
             valid = batch["valid"].to(device, non_blocking=True)
@@ -336,7 +354,12 @@ def main() -> None:
             opt_head.zero_grad(set_to_none=True)
             if opt_seg is not None:
                 opt_seg.zero_grad(set_to_none=True)
-            loss.backward()
+            total_loss = loss
+            if laplace is not None:
+                pen = laplace.penalty() / n_train
+                total_loss = loss + pen
+                pen_sum += float(pen)
+            total_loss.backward()
             if args.grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad],
                                                args.grad_clip_norm)
@@ -347,12 +370,13 @@ def main() -> None:
                 sched_seg.step()
             loss_sum += float(loss) * len(label)
             n_seen += len(label)
+            n_steps += 1
 
         val = evaluate("val")
         row = {"epoch": epoch, "train_loss": loss_sum / max(n_seen, 1), "seconds": time.time() - t0,
                "head_lr": opt_head.param_groups[0]["lr"],
                "seg_lr": opt_seg.param_groups[-1]["lr"] if opt_seg is not None else 0.0,
-               "prior_scale": float(model.prior_scale),
+               "prior_scale": float(model.prior_scale), "laplace_penalty": pen_sum / max(n_steps, 1),
                **{k: v for k, v in val.items() if isinstance(v, (int, float))}}
         history.append(row)
         print(f"[stage4] epoch {epoch:>3}: loss {row['train_loss']:.4f}  val acc {val['accuracy']:.4f}  "
@@ -361,6 +385,7 @@ def main() -> None:
               f"(sel {val['macro_f1_sel']:.4f})  NLL {val['nll']:.3f}  {row['seconds']:.0f}s")
         log_metrics(wandb_run, {"epoch": epoch, "train/loss": row["train_loss"], "lr/head": row["head_lr"],
                                 "lr/seg": row["seg_lr"], "prior_scale": row["prior_scale"],
+                                "train/laplace_penalty": row["laplace_penalty"],
                                 **scalars("val", val)}, step=epoch)
         # NaN when no class reaches --select-min-support val blocks: fall back to
         # plain macro-F1, and always keep at least the first epoch's checkpoint.

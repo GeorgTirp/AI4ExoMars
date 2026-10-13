@@ -13,7 +13,8 @@ set -euo pipefail
 #     RUN_NAME=dryrun DRYRUN=1 condor_submit_bid 20 run_block_finetune.sub
 #
 # Optional: SEG_CKPT (default: E10 full hybrid, val mIoU 0.2072), EXPECT_NEW
-# (default 4: the four new expert classes), EPOCHS, PROBE_EPOCHS, EXTRA_ARGS.
+# (default 4: the four new expert classes), EPOCHS, PROBE_EPOCHS, EXTRA_ARGS
+# (e.g. "--laplace-prior checkpoints/laplace/noahh_prior_e10.pt --laplace-tau 30").
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -80,4 +81,9 @@ python -m vision_backend.train_stage4_block_finetune \
   ${EXTRA_ARGS:-}
 
 cp "$OUT_DIR/metrics.json" "results/block_finetune/${RUN_NAME}.json"
+
+# Same post-hoc evaluation for every run: temperature scaling, spatial-bootstrap
+# CIs, val-vs-test on the same classes, NOAH-H val mIoU of the segmenter.
+python scripts/eval_block_classifier.py "$OUT_DIR/best.pt" --manifest "$MANIFEST" --noahh-eval
+cp "$OUT_DIR/eval.json" "results/block_finetune/${RUN_NAME}.eval.json"
 echo "Block fine-tune $RUN_NAME finished cleanly at $(date -Is)."

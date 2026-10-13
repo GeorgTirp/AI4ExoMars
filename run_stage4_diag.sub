@@ -1,0 +1,25 @@
+# Stage-4 diagnostics + Laplace prior fit (run_stage4_diag.sh).
+#   condor_submit_bid 20 run_stage4_diag.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = run_stage4_diag.sh
+
+output = job_outputs/block_finetune/diag.$(Cluster).out
+error  = job_outputs/block_finetune/diag.$(Cluster).err
+log    = job_outputs/block_finetune/diag.$(Cluster).log
+request_cpus   = 8
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 40000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet")
+getenv = True
++JobBatchName = "ai4exomars-stage4-diag"
+MaxTime = 10800
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Stage-4 diagnostics exited non-zero -- check the .err log"
+queue 1

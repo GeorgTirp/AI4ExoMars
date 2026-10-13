@@ -325,6 +325,41 @@ LP-FT with 2 probe epochs then 28 full; E10 segmenter; ~35 s/epoch, 17 min in to
 - The val vs test `macro_f1_sel` values (0.594 vs 0.440) cover different class sets (test adds Continuous small ripples and Smooth bedrock) and val was used for selection, so they are not directly comparable.
 - Single run; per-class numbers for classes with fewer than 10 test blocks are anecdotal.
 
+### E14 — Calibration, estimate uncertainty, forgetting, site shift (cluster 17697380, `run_stage4_diag.sh`)
+- **Calibration (E13)**: the fitted temperature is T* = 2.24 on val, i.e. clearly overconfident. Temperature scaling on test:
+  - NLL 1.744 → **1.118**
+  - ECE 0.256 → **0.099**
+  - Brier 0.579 → 0.501
+  - Accuracy / F1 unchanged.
+  - `scripts/eval_block_classifier.py` now does this for every run (in `run_block_finetune.sh`).
+- **How precise is one test number?** Spatial bootstrap (whole 1 km cells resampled), 95 % CIs:
+  - accuracy 0.656 [0.523, 0.774]
+  - macro-F1 0.320 [0.295, 0.462]
+  - macro-F1 (≥ 5 blocks) 0.440 [0.334, 0.563]
+  - Two runs therefore have to be compared *paired* on the same blocks (`scripts/compare_block_runs.py`), not by their separate CIs.
+- **Overfitting of the model selection**: val vs test macro-F1 on the *same* 6 classes is 0.594 vs 0.539. That is a 0.055 optimism from picking the best of 30 epochs on val (plus the site difference), well inside the test CI.
+- **Forgetting**: NOAH-H val mIoU of the segmenter, same evaluator, is 0.2072 before and **0.1896** after plain block fine-tuning (−0.018).
+- **Site shift (`scripts/diag_site_shift.py`, `results/block_finetune/site_shift.json`)**, 150 crops each:
+  - **Same:** mean, contrast (std 15.3 vs 17.3) and sun azimuth (shading 141° vs 133°).
+  - **Different:** the expert imagery is much sharper and noisier.
+    - Power at 0.25–0.5 cycles/px is 0.6 % vs 3.4 %.
+    - Power at 0.1–0.25 cycles/px is 6.5 % vs 12.4 %.
+    - Noise/std is 0.035 vs 0.112.
+  - This fits the Oxia DRG having been cubic-resampled onto the label grid.
+  - **Causal test refuted**: low-passing the expert blocks to the Oxia spectrum (σ 0.7 / 1.0 px) leaves the zero-shot collapse unchanged (val accuracy 0.018 → 0.021 / 0.030; balanced accuracy 0.18 → 0.18 / 0.21).
+  - Remaining candidates: histogram *shape* (only p1/p99 are matched), illumination geometry (stronger shadow skew, 0.78 vs 0.39), real geological / site difference.
+- **Laplace prior (campaign 0)**: per-image MC Fisher on 2 000 NOAH-H train crops, 139 s on an A100 (`checkpoints/laplace/noahh_prior_e10.pt`). Diagonal: median 1.0, mean 24, max 6.5e7.
+  - E13's weight change costs Q = 63.8 (all) / 56.2 (encoder) per unit τ, against a data loss of 411 (1 337 blocks × CE 0.31).
+  - So τ = 0.65 / 6.5 / 65 make the prior 0.1× / 1× / 10× the data term.
+
+### E15 — Laplace-prior sweep (clusters 17697392–17697397; running)
+All runs use seed 42 and the E13 recipe, except the seed control:
+- `plain_s43`: plain, seed 43 (run-to-run noise floor);
+- `laplace_all_t{0.65,6.5,65}`: prior on all segmenter weights;
+- `laplace_enc_t7.3`: encoder only, decoder free.
+
+E13 is re-evaluated on GPU for paired comparisons.
+
 ## 8. Where things are
 | | |
 |---|---|

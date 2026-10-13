@@ -160,7 +160,7 @@ def test_checkpoint_round_trip(tmp_path):
 
 def test_stage4_script_end_to_end(tmp_path, monkeypatch):
     """main(): zero-shot eval, probe epoch, unfreeze with the routed Muon/NAdamW
-    optimizer, full fine-tuning epoch, best checkpoint, test split."""
+    optimizer and a Laplace prior, full fine-tuning epoch, best checkpoint, test split."""
     rasterio = pytest.importorskip("rasterio")
     pytest.importorskip("muon")
     import sys
@@ -169,6 +169,9 @@ def test_stage4_script_end_to_end(tmp_path, monkeypatch):
     torch.manual_seed(0)
     seg = build_simmim_segmentation_model(dict(CFG, num_classes=3))
     torch.save({"model_state": seg.state_dict(), "config": {"model": dict(CFG)}}, tmp_path / "seg.pt")
+    from vision_backend.laplace_prior import save_prior
+    save_prior(tmp_path / "prior.pt", dict(seg.named_parameters()),
+               {n: torch.ones_like(p) for n, p in seg.named_parameters()}, source_checkpoint="seg.pt")
     rng = np.random.default_rng(0)
     profile = {"driver": "GTiff", "width": 1024, "height": 1024, "count": 1, "dtype": "uint8"}
     with rasterio.open(tmp_path / "mosaic.tif", "w", **profile) as ds:
@@ -185,10 +188,14 @@ def test_stage4_script_end_to_end(tmp_path, monkeypatch):
         "stage4", "--seg-checkpoint", str(tmp_path / "seg.pt"), "--manifest", str(tmp_path / "blocks.csv"),
         "--imagery-path", str(tmp_path / "mosaic.tif"), "--dc-classes-json", str(_dc_json(tmp_path)),
         "--out-dir", str(tmp_path / "out"), "--epochs", "2", "--probe-epochs", "1", "--batch-size", "2",
-        "--num-workers", "0", "--expect-new-classes", "1", "--jitter", "16", "--block-size", "256"])
+        "--num-workers", "0", "--expect-new-classes", "1", "--jitter", "16", "--block-size", "256",
+        "--laplace-prior", str(tmp_path / "prior.pt"), "--laplace-tau", "100"])
     stage4.main()
 
     metrics = json.loads((tmp_path / "out" / "metrics.json").read_text())
+    with (tmp_path / "out" / "history.csv").open(newline="") as fh:
+        penalties = [float(r["laplace_penalty"]) for r in csv.DictReader(fh)]
+    assert penalties[0] == 0.0 and penalties[1] > 0.0  # probe epoch: no prior; full fine-tuning: active
     assert {"zero_shot_val", "best_val", "test", "best_epoch"} <= set(metrics)
     model, ckpt = load_block_classifier(tmp_path / "out" / "best.pt")
     assert ckpt["classes"]["names"][3:] == ["Crater"]
