@@ -453,6 +453,23 @@ Runs (all with the τ 65 prior):
 - **Choice**: segmenter LR ×3, 12 epochs, last epoch (`v2_final_lr3_e12`, cluster 17697781). Best mean macro-F1 and NLL at half the training cost; the LR itself is marginal.
   - Refit on the train split (val kept as the calibration set) and scored on test once.
 
+**Current Stage-4 model: `checkpoints/block_finetune/v2_final_lr3_e12/best.pt`.** Both observations, whole 1024 blocks, τ 65 prior, segmenter LR ×3, 12 epochs, last epoch, temperature T* from val (`eval.json`).
+
+| test (531 blocks) | accuracy [95 % CI] | macro-F1 ≥ 5 | NLL / ECE after T-scaling | NOAH-H val mIoU |
+|---|---|---|---|---|
+| pooled | **0.682** [0.58, 0.79] | 0.430 | 1.046 / **0.063** | 0.196 (0.207 before) |
+| ESP_027201 (176) | 0.699 [0.57, 0.84] | 0.602 | | |
+| ESP_075512 (355) | 0.673 [0.52, 0.81] | 0.408 | | |
+
+- **Paired vs the untuned whole-block run** (`v2_bags_t65`: E13 recipe, 30 epochs, best-val epoch):
+  - accuracy +0.019 [−0.007, +0.048]
+  - macro-F1 ≥ 5 −0.009 [−0.088, +0.043]
+  - calibrated NLL −0.064 [−0.109, −0.011]
+  - NOAH-H 0.1958 vs 0.1949
+
+  The CV verdict holds on test: same accuracy, slightly better calibrated, at 40 % of the training compute.
+- Macro-F1 over *all* present classes (0.360 vs 0.416) moves with classes that have 1–3 test blocks. It is not a reliable signal at this test size.
+
 ## 8. Where things are
 | | |
 |---|---|
