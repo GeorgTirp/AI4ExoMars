@@ -352,13 +352,25 @@ LP-FT with 2 probe epochs then 28 full; E10 segmenter; ~35 s/epoch, 17 min in to
   - E13's weight change costs Q = 63.8 (all) / 56.2 (encoder) per unit τ, against a data loss of 411 (1 337 blocks × CE 0.31).
   - So τ = 0.65 / 6.5 / 65 make the prior 0.1× / 1× / 10× the data term.
 
-### E15 — Laplace-prior sweep (clusters 17697392–17697397; running)
-All runs use seed 42 and the E13 recipe, except the seed control:
-- `plain_s43`: plain, seed 43 (run-to-run noise floor);
-- `laplace_all_t{0.65,6.5,65}`: prior on all segmenter weights;
-- `laplace_enc_t7.3`: encoder only, decoder free.
+### E15 — Laplace-prior sweep (clusters 17697392–17697397, `results/block_finetune/e15_paired_vs_e13.json`)
+All runs use seed 42 and the E13 recipe, except the seed control `plain_s43`. Δ is paired against E13 on the same test blocks (cell bootstrap). NLL is after each run's own temperature.
 
-E13 is re-evaluated on GPU for paired comparisons.
+| run | NOAH-H val mIoU (0.2072 before) | forgetting | Δ test acc [95 % CI] | Δ macro-F1 ≥ 5 | test ECE raw → T-scaled | best epoch |
+|---|---|---|---|---|---|---|
+| E13 plain, seed 42 | 0.1896 | −0.0176 | — | — | 0.256 → 0.099 | 25 |
+| plain, seed 43 | 0.1916 | −0.0156 | +0.009 [0.000, +0.028] | +0.006 | 0.218 → 0.068 | 19 |
+| Laplace τ 0.65, all | 0.1910 | −0.0162 | 0.000 | −0.001 | 0.238 → 0.091 | 25 |
+| Laplace τ 6.5, all | 0.1956 | −0.0116 | −0.003 [−0.036, +0.033] | −0.007 | 0.146 → 0.082 | 10 |
+| **Laplace τ 65, all** | **0.1989** | **−0.0083** | −0.003 [−0.055, +0.046] | +0.013 | **0.131** → 0.094 | 10 |
+| Laplace τ 7.3, encoder only | 0.1955 | −0.0117 | 0.000 | −0.004 | 0.147 → 0.076 | 10 |
+
+- **The prior roughly halves forgetting at τ = 65** (−0.0176 → −0.0083 NOAH-H mIoU). The trend is monotone in τ and about 4× the seed spread (0.002).
+- **No measurable cost on the expert task**: all Δ accuracy / F1 are within ±0.013 and inside the seed spread. Caveat: the test set can only resolve differences of roughly ±0.03–0.05.
+- **Better raw calibration** (ECE 0.256 → 0.131): the prior limits the overconfident drift. After temperature scaling all runs are similar (ECE 0.07–0.10).
+- **Encoder-only (decoder free) ≈ all at the same τ**: the protection comes from the encoder.
+- **The stability/plasticity frontier is not reached at τ = 65**; τ = 650 / 6500 would locate where expert accuracy starts to pay.
+- **Method note**: the paired bootstrap CI covers test-sampling noise only. The two plain seeds differ "significantly" in calibrated NLL (−0.061, CI excludes 0), so any decision needs effects larger than the seed spread, not just CIs that exclude 0.
+- **Val → test optimism** on the same 6 classes is 0.03–0.06 in every run (val 0.593–0.597, test 0.538–0.566). This is consistent with mild selection optimism, not a run-specific overfit.
 
 ## 8. Where things are
 | | |
