@@ -14,6 +14,8 @@ Every number below is reproducible from the checkpoints, logs and result files l
 | lean Stage-3 alternative | `checkpoints/arch_ablation_no_global_s3_depth2/best_16ep.pt` | as above, no global attention, 1/16 Swin depth 2 (E11) | 0.2055 at −23 % params, −25 % training time |
 | **Laplace prior** (campaign 0) | `checkpoints/laplace/noahh_prior_e10.pt` | diagonal MC Fisher of the Stage-3 segmenter on 2 000 NOAH-H crops (E14) | used at τ = 64.5 (E15) |
 | **Stage-4 block classifier** | `checkpoints/block_finetune/v2_final_lr3_e12/best.pt` | Stage-3 segmenter + MIL block head; LP-FT with 2 probe epochs; τ 64.5 prior; segmenter LR ×3 (Muon 5.16e-5, NAdamW 1.824e-5); 12 epochs, last epoch; both observations, whole 1024 blocks (E16) | test accuracy **0.682** [0.58, 0.79]; ECE 0.063 after temperature scaling (T* = 1.61, in `eval.json`); NOAH-H mIoU 0.196 |
+| Stage-4 uncertainty / explainability files | next to the Stage-4 checkpoint; `README.md` there describes them | last-layer Laplace, Mahalanobis and neural-PCA bases (block and pixel level), segmenter in Stage-3 format (E17) | Laplace MC test ECE 0.058; Oxia-vs-expert AUROC 0.998 (Mahalanobis) |
+| campaign-1 posterior | `checkpoints/laplace/campaign1_posterior_v2_final_lr3_e12.pt` | τ · F_NOAH-H + 2 010 · F̄_expert at the Stage-4 weights, all parameters (E17) | prior for campaign 2 |
 
 ## 1. Common setup (unless a section says otherwise)
 
@@ -492,6 +494,35 @@ Runs (all with the τ 65 prior):
   The CV verdict holds on test: same accuracy, slightly better calibrated, at 40 % of the training compute.
 - Macro-F1 over *all* present classes (0.360 vs 0.416) moves with classes that have 1–3 test blocks. It is not a reliable signal at this test size.
 
+### E17 — Uncertainty and explainability files for the Stage-4 model (2026-10-14, cluster 17699123, `results/block_artifacts/v2_final_lr3_e12.json`)
+`scripts/fit_block_artifacts.py` (`run_block_artifacts.sub`) fits, next to `v2_final_lr3_e12/best.pt`, everything that needs a GPU, the expert blocks or the NOAH-H crops. Local inference then needs only that folder; its `README.md` describes every file. Took 6 min on one A100.
+- **Block feature** φ = [LN(z), p̄] (270-dim): the input of the head's last layer, from `BlockClassifier.block_features` (logits = offset + fc(φ)).
+- **Last-layer Laplace** (`best.laplace.pt`, `uncertainty/block_laplace.py`):
+  - exact GGN over fc's 4 878 weights on the 2 010 train blocks;
+  - prior precision λ = 10, tuned on val NLL (interior of a 1e-4…1e6 grid);
+  - centred logit covariance; probit or MC predictive, with aleatoric / mutual-information split.
+- **Block Mahalanobis** (`best.uncertainty.pt`): shared covariance over φ, 15 classes with train blocks.
+- **Block neural-PCA bases** (`best.npca.pt`): ψ_k = fc.weight[k] ⊙ φ, 4 directions for the 14 classes with ≥ 10 train blocks. No gallery: the app ranks the observation's own blocks.
+- **Pixel level** for the 14 NOAH-H classes: `segmenter.pt` (Stage-3 format, logits identical to the block model's segmenter) with `segmenter.uncertainty.pt` and `segmenter.npca.pt`, fitted on 1 500 random NOAH-H train crops (13 / 11 classes).
+- **Campaign posterior** (`checkpoints/laplace/campaign1_posterior_v2_final_lr3_e12.pt`, 383 MB): τ · F_NOAH-H + N · F̄_expert over all BlockClassifier weights. F̄_expert is the per-block MC Fisher (2 010 blocks, 165 s).
+
+Test set (531 blocks):
+
+| predictive | accuracy | NLL | ECE |
+|---|---|---|---|
+| raw softmax | 0.680 | 1.207 | 0.143 |
+| temperature (T* 1.61) | 0.680 | **1.046** | 0.062 |
+| last-layer Laplace, probit | 0.676 | 1.088 | 0.071 |
+| last-layer Laplace, MC | 0.682 | 1.139 | **0.058** |
+
+- **Calibration**: the Laplace predictive removes most of the overconfidence, like temperature scaling (slightly higher NLL, same ECE). It adds the aleatoric / epistemic split, which temperature cannot give.
+- **Misclassification detection** (AUROC): Laplace MC entropy 0.727, temperature 1 − max p 0.711, mutual information 0.663, block Mahalanobis 0.600.
+- **Different site** (150 Oxia NOAH-H val crops vs expert test blocks):
+  - block Mahalanobis AUROC **0.998** (median normalised distance 2.14 vs 0.60 / 0.79);
+  - Laplace mutual information AUROC 0.969 (1.30 vs 0.42).
+  - So distance and epistemic uncertainty flag unfamiliar terrain, and entropy flags likely errors.
+- **Pixel Mahalanobis at the expert sites**: median normalised distance 1.64 / 1.68 vs 1.14 on NOAH-H val crops. The default [0, 1] display clamp therefore saturates on expert observations; display raw distances with per-observation scaling.
+
 ## 7c. Stage 4 — what we learned, and what is open
 
 1. **The features transfer to new sites; NOAH-H's class mapping does not.** Zero-shot, the segmenter's dominant-class rule scores 0.018 val accuracy. A head on the frozen features reaches 0.58 after two probe epochs (E13).
@@ -518,14 +549,10 @@ Runs (all with the τ 65 prior):
    - Val-selection optimism is 0.03–0.06.
 8. **Site shift is not a blur effect.** The expert imagery is sharper and noisier than the Oxia DRG, but blurring it to the Oxia spectrum does not change the zero-shot collapse (E14).
 
-Open / next (none run yet):
-- **Laplace posterior.** Add the Fisher of the expert blocks at the final weights to the τ-scaled prior. This gives:
-  - the prior for campaign 2;
-  - a last-layer Laplace predictive on the block head (`fc`, 18 × 270) for uncertainty per block. Compare it with temperature scaling.
-- **Uncertainty-map and Neural-PCA files for the block model.** `fit_calibration_artifacts.sh` only handles Stage-3 pixel segmenters (14 NOAH-H classes).
-  - Block-level Neural PCA: ψ_k = `fc.weight[k]` ⊙ [LN(z), p̄] (270-dim).
-  - Block-level Mahalanobis: on z.
-  - The user does this locally with the labelling app.
+Done since: the Laplace posterior and the uncertainty / neural-PCA files for the block model (E17).
+
+Open / next:
+- **Campaign 2 with the posterior as prior.** The Stage-4 trainer applies its prior to `model.seg` only; it needs to apply `campaign1_posterior_v2_final_lr3_e12.pt` over all BlockClassifier parameters at τ = 1.
 - **Next labelling campaign.**
   - More blocks for Continuous small ripples, Discontinuous small ripples (non-bedrock), Boulder fields, Continuous large ripples, Periodic Bedrock Ridges and Yardangs.
   - At least one new observation held out entirely as test.
@@ -559,6 +586,7 @@ Open / next (none run yet):
 | checkpoints | `checkpoints/block_finetune/<run>/{best.pt, eval.json, eval_preds.npz, metrics.json}`, `checkpoints/laplace/` |
 | logs | `job_outputs/block_finetune/`, `job_outputs/block_cv/`, wandb `ai4exomars_block_finetune` |
 | tests | `vision_backend/tests/test_block_head.py`, `test_laplace_prior.py`, `test_prep_expert_blocks.py` |
-| key commits | 55a165a (Stage 4), c88cae5 (calibration eval, Laplace prior), a0e3497 (1024 blocks, spatial CV) |
+| uncertainty / explainability files | `scripts/fit_block_artifacts.py`, `run_block_artifacts.{sh,sub}`, `vision_backend/uncertainty/block_laplace.py`, `vision_backend/tests/test_block_artifacts.py` → files and `README.md` next to the checkpoint, `results/block_artifacts/<run>.json`, `checkpoints/laplace/campaign1_posterior_<run>.pt` |
+| key commits | 55a165a (Stage 4), c88cae5 (calibration eval, Laplace prior), a0e3497 (1024 blocks, spatial CV), 840dd45 (uncertainty / explainability files) |
 
 **Running the final model off the cluster**: the pushed repo code plus `best.pt` is all that is needed (`eval.json` holds T*). Call `load_block_classifier(path, device="cpu")`. This was checked on 2026-10-13 from a clean clone of 3e2cc21 with no GPU and no cluster files. On the login-node CPU, a 512 block took 11 s and a 1024 block 40 s. The `run_*.{sh,sub}` launchers are cluster-only.
