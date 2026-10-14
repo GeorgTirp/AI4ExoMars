@@ -215,6 +215,32 @@ def test_fit_block_artifacts_script_end_to_end(tmp_path):
     assert all((run / f).is_file() for f in ("best.laplace.pt", "best.uncertainty.pt", "best.npca.pt"))
     torch.testing.assert_close(load_last_layer_laplace(run / "best.laplace.pt").eigvals, la.eigvals)
 
+    # the next campaign: start from this model with its posterior as the prior over every weight,
+    # head included -- the prior acts already in the probe epoch, where only the head moves (the
+    # unfreeze / full fine-tuning path is test_block_head.py::test_stage4_script_end_to_end)
+    from vision_backend import train_stage4_block_finetune as stage4
+    torch.save({"model_state": model.seg.state_dict(), "config": {"model": dict(CFG)}}, tmp_path / "seg.pt")
+    argv = ["stage4", "--seg-checkpoint", str(tmp_path / "seg.pt"), "--manifest", str(tmp_path / "manifest.csv"),
+            "--block-classes", str(tmp_path / "block_classes.json"), "--dc-classes-json", str(dc),
+            "--epochs", "1", "--probe-epochs", "1", "--batch-size", "2", "--num-workers", "0",
+            "--block-size", "256", "--init-block-checkpoint", str(run / "best.pt")]
+    old = sys.argv
+    try:
+        sys.argv = argv + ["--out-dir", str(tmp_path / "next"), "--laplace-prior", str(post), "--laplace-tau", "1"]
+        stage4.main()
+    finally:
+        sys.argv = old
+    first = json.loads((tmp_path / "next" / "metrics.json").read_text())["zero_shot_val"]
+    with torch.no_grad():
+        x = torch.stack([torch.from_numpy(np.array(Image.open(tmp_path / r["image"]), dtype=np.float32) / 127.5 - 1)
+                         for r in rows if r["split"] == "val"])[:, None]
+        start = model(x).argmax(1).numpy()
+    labels = np.array([names.index(r["label"]) for r in rows if r["split"] == "val"])
+    assert abs(first["accuracy"] - float((start == labels).mean())) < 1e-6   # starts exactly at the old model
+    with (tmp_path / "next" / "history.csv").open(newline="") as fh:
+        penalties = [float(r["laplace_penalty"]) for r in csv.DictReader(fh)]
+    assert penalties[0] > 0.0   # the head is under the prior from the first (probe) epoch
+
 
 # --------------------------------------------------------------------------- normcdf head (E18)
 def test_normcdf_head_starts_as_the_dominant_class_rule_and_matches_softmax_at_init():

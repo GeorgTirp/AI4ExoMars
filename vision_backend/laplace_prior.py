@@ -141,17 +141,23 @@ def quadratic_form(params: dict[str, torch.Tensor], prior: dict, *, scope: str =
 def in_scope(name: str, scope: str) -> bool:
     if scope == "all":
         return True
-    if scope == "encoder":
-        return name.startswith("encoder.")
+    if scope == "encoder":  # segmenter names, bare or inside a BlockClassifier ("seg.encoder.")
+        return name.removeprefix("seg.").startswith("encoder.")
     raise ValueError(f"unknown Laplace scope {scope!r} (all | encoder)")
+
+
+def covers_block_head(prior: dict) -> bool:
+    """True for a posterior over a whole BlockClassifier ('seg.*' and head names,
+    scripts/fit_block_artifacts.py), False for a prior over a bare segmenter."""
+    return any(n.startswith("seg.") for n in prior["fisher"])
 
 
 class DiagonalLaplacePrior:
     """1/2 sum_j (tau * F_j + delta) (theta_j - mu_j)^2 over a model's parameters."""
 
-    def __init__(self, path: str | Path, model: torch.nn.Module, *, tau: float, delta: float = 0.0,
+    def __init__(self, path: str | Path | dict, model: torch.nn.Module, *, tau: float, delta: float = 0.0,
                  scope: str = "all", device: Optional[torch.device] = None, atol: float = 1e-5):
-        prior = torch.load(str(path), map_location="cpu", weights_only=False)
+        prior = path if isinstance(path, dict) else torch.load(str(path), map_location="cpu", weights_only=False)
         self.terms: list[tuple[torch.nn.Parameter, torch.Tensor, torch.Tensor]] = []
         self.num_params = 0
         max_offset = 0.0

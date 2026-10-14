@@ -42,7 +42,7 @@ try:
     from vision_backend.training.builders import build_simmim_segmentation_model, load_segmentation_model_from_checkpoint
     from vision_backend.training.utils import compute_class_weights, count_parameters, set_seed
     from vision_backend.training.wandb_utils import add_wandb_arguments, finish_wandb_run, init_wandb_run, log_metrics
-    from vision_backend.laplace_prior import DiagonalLaplacePrior
+    from vision_backend.laplace_prior import DiagonalLaplacePrior, covers_block_head
 except ModuleNotFoundError:
     from block_dataset import (DEFAULT_DC_CLASSES_JSON, BlockClasses, BlockDataset,
                                SizeGroupedBatchSampler, load_block_manifest)
@@ -51,7 +51,7 @@ except ModuleNotFoundError:
     from training.builders import build_simmim_segmentation_model, load_segmentation_model_from_checkpoint
     from training.utils import compute_class_weights, count_parameters, set_seed
     from training.wandb_utils import add_wandb_arguments, finish_wandb_run, init_wandb_run, log_metrics
-    from laplace_prior import DiagonalLaplacePrior
+    from laplace_prior import DiagonalLaplacePrior, covers_block_head
 
 DEFAULT_IMAGERY = "data/2022-02-08_ABarrett_OU_HiRISE_NOAH-H_Mosaic/derived/drg_on_label_grid.tif"
 # HybridEncoder at the tuned recipe, seed 42 (E10 "no_lovasz", val mIoU 0.2072).
@@ -105,7 +105,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--eval-only", action="store_true", help="Zero-shot evaluation of the initial model only.")
     p.add_argument("--laplace-prior", default=None,
-                   help="Campaign-0 prior (scripts/fit_laplace_prior.py); off unless --laplace-tau > 0.")
+                   help="Campaign-0 prior over the segmenter (scripts/fit_laplace_prior.py), or a campaign "
+                        "posterior over the whole block classifier (scripts/fit_block_artifacts.py, use "
+                        "--laplace-tau 1 with --init-block-checkpoint); off unless --laplace-tau > 0.")
+    p.add_argument("--init-block-checkpoint", default=None,
+                   help="Start from a trained block classifier (segmenter + head), e.g. the previous "
+                        "campaign's model, instead of the Stage-3 segmenter with a fresh head.")
     p.add_argument("--laplace-tau", type=float, default=0.0,
                    help="Prior strength: effective number of NOAH-H images (precision = tau * F_img).")
     p.add_argument("--laplace-scope", choices=("all", "encoder"), default="all",
@@ -309,6 +314,14 @@ def main() -> None:
         raise SystemExit(f"segmenter has {num_seg} classes, the class list has {K - classes.num_new} NOAH-H classes")
     model = BlockClassifier(seg_model, classes.seg_index, attn_hidden=args.attn_hidden,
                             dropout=args.head_dropout, tile_size=args.block_size, link=args.link).to(device)
+    if args.init_block_checkpoint:
+        init = torch.load(args.init_block_checkpoint, map_location="cpu", weights_only=False)
+        if init["classes"]["names"] != classes.names:
+            raise SystemExit(f"{args.init_block_checkpoint}: class list differs from this run's")
+        if init["head_config"].get("link", "softmax") != args.link:
+            raise SystemExit(f"{args.init_block_checkpoint}: link {init['head_config'].get('link')!r} != {args.link!r}")
+        model.load_state_dict(init["block_state"])
+        print(f"[stage4] initialised from block classifier {args.init_block_checkpoint} (epoch {init.get('epoch')})")
     print(f"[stage4] segmenter {args.seg_checkpoint}: {count_parameters(model.seg):,} params; "
           f"block head {sum(p.numel() for p in model.head_parameters()):,} params")
 
@@ -358,6 +371,20 @@ def main() -> None:
     opt_seg = sched_seg = laplace = None
     set_segmenter_trainable(model, False)
     n_train = len(datasets["train"])
+    if args.laplace_prior and args.laplace_tau > 0:
+        # The objective is sum_n CE_n + 1/2 (theta-mu)^T Lambda (theta-mu); the loss below is the
+        # mean CE, so the prior enters divided by N_train. Weight decay stays as in the plain run
+        # (at these LRs it shrinks weights by < 0.3 % over the whole run), so the prior is the only
+        # difference between the arms. A prior over the segmenter is zero during the probe epochs
+        # (the segmenter is frozen at its mean); a campaign posterior also covers the head, which
+        # the probe epochs train, so it is built here, before any weight moves.
+        prior = torch.load(args.laplace_prior, map_location="cpu", weights_only=False)
+        target = model if covers_block_head(prior) else model.seg
+        laplace = DiagonalLaplacePrior(prior, target, tau=args.laplace_tau, scope=args.laplace_scope, device=device)
+        del prior
+        print(f"[stage4] Laplace prior over the {'whole block classifier' if target is model else 'segmenter'}: "
+              f"tau {args.laplace_tau:g}, scope {args.laplace_scope}, {laplace.num_params:,} params, "
+              f"/ N_train = {n_train}")
 
     ckpt_path = out_dir / "best.pt"
     history, best_f1, best_epoch = [], -math.inf, 0
@@ -372,15 +399,6 @@ def main() -> None:
             remaining = (args.epochs - probe_epochs) * steps_per_epoch
             sched_seg = create_cosine_scheduler_with_warmup(opt_seg, int(args.warmup_fraction * remaining), remaining)
             print(f"[stage4] epoch {epoch}: segmenter unfrozen")
-            if args.laplace_prior and args.laplace_tau > 0:
-                # The objective is sum_n CE_n + 1/2 (theta-mu)^T Lambda (theta-mu); the loss
-                # below is the mean CE, so the prior enters divided by N_train. Weight decay
-                # stays as in the plain run (at these LRs it shrinks weights by < 0.3 % over
-                # the whole run), so the prior is the only difference between the two arms.
-                laplace = DiagonalLaplacePrior(args.laplace_prior, model.seg, tau=args.laplace_tau,
-                                               scope=args.laplace_scope, device=device)
-                print(f"[stage4] Laplace prior: tau {args.laplace_tau:g}, scope {args.laplace_scope}, "
-                      f"{laplace.num_params:,} params, / N_train = {n_train}")
 
         model.train()
         if opt_seg is None:
@@ -444,6 +462,7 @@ def main() -> None:
                         "head_config": {"attn_hidden": args.attn_hidden, "dropout": args.head_dropout,
                                         "tile_size": args.block_size, "link": args.link},
                         "source_checkpoint": str(args.seg_checkpoint),
+                        "init_block_checkpoint": args.init_block_checkpoint,
                         "epoch": epoch, "metrics": val, "args": vars(args)}, ckpt_path)
             results["best_val"] = val
         with (out_dir / "history.csv").open("w", newline="") as fh:

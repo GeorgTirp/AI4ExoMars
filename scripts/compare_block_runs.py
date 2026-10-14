@@ -46,9 +46,19 @@ def main() -> None:
     ap.add_argument("--min-support", type=int, default=5)
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--eval-name", default="eval", help="which evaluation of each run (eval -> eval.json)")
+    ap.add_argument("--obs", default=None, help="only the test blocks of this observation (cell prefix)")
     args = ap.parse_args()
     classes = load_block_classes(args.block_classes)
     ref = load(args.reference, args.eval_name)
+    keep = np.ones(len(ref["y"]), dtype=bool) if args.obs is None else \
+        np.array([str(c).startswith(args.obs) for c in ref["g"]])
+    if not keep.any():
+        raise SystemExit(f"no test blocks of observation {args.obs!r}")
+
+    def subset(r):
+        return {k: (v[keep] if isinstance(v, np.ndarray) else v) for k, v in r.items()}
+
+    ref = subset(ref)
     cells = np.unique(ref["g"])
     members = {c: np.flatnonzero(ref["g"] == c) for c in cells}
     rng = np.random.default_rng(0)
@@ -66,6 +76,9 @@ def main() -> None:
     out = {"reference": args.reference, "reference_metrics": dict(zip(keys, base)), "runs": {}}
     for run in args.runs:
         r = load(run, args.eval_name)
+        if not (np.array_equal(r["y"], load(args.reference, args.eval_name)["y"])):
+            raise SystemExit(f"{run}: test blocks differ from the reference's")
+        r = subset(r)
         if not (np.array_equal(r["y"], ref["y"]) and np.array_equal(r["g"], ref["g"])):
             raise SystemExit(f"{run}: test blocks differ from the reference's")
         point = np.array(metrics(r, all_idx)) - np.array(base)
