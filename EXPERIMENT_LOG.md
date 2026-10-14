@@ -14,7 +14,7 @@ Every number below is reproducible from the checkpoints, logs and result files l
 | lean Stage-3 alternative | `checkpoints/arch_ablation_no_global_s3_depth2/best_16ep.pt` | as above, no global attention, 1/16 Swin depth 2 (E11) | 0.2055 at −23 % params, −25 % training time |
 | **Laplace prior** (campaign 0) | `checkpoints/laplace/noahh_prior_e10.pt` | diagonal MC Fisher of the Stage-3 segmenter on 2 000 NOAH-H crops (E14) | used at τ = 64.5 (E15) |
 | **Stage-4 block classifier** | `checkpoints/block_finetune/v2_final_lr3_e12/best.pt` | Stage-3 segmenter + MIL block head; LP-FT with 2 probe epochs; τ 64.5 prior; segmenter LR ×3 (Muon 5.16e-5, NAdamW 1.824e-5); 12 epochs, last epoch; both observations, whole 1024 blocks (E16) | test accuracy **0.682** [0.58, 0.79]; ECE 0.063 after temperature scaling (T* = 1.61, in `eval.json`); NOAH-H mIoU 0.196 |
-| Stage-4 uncertainty / explainability files | next to the Stage-4 checkpoint; `README.md` there describes them | last-layer Laplace, Mahalanobis and neural-PCA bases (block and pixel level), segmenter in Stage-3 format (E17) | Laplace MC test ECE 0.058; Oxia-vs-expert AUROC 0.998 (Mahalanobis) |
+| Stage-4 uncertainty / explainability files | next to the Stage-4 checkpoint; `README.md` there describes them | last-layer Laplace, Mahalanobis and neural-PCA bases (block and pixel level), segmenter in Stage-3 format (E17) | temperature-scaled probabilities best (test NLL 1.046); Oxia-vs-expert AUROC 0.998 (Mahalanobis) |
 | campaign-1 posterior | `checkpoints/laplace/campaign1_posterior_v2_final_lr3_e12.pt` | τ · F_NOAH-H + 2 010 · F̄_expert at the Stage-4 weights, all parameters (E17) | prior for campaign 2 |
 
 ## 1. Common setup (unless a section says otherwise)
@@ -523,6 +523,67 @@ Test set (531 blocks):
   - So distance and epistemic uncertainty flag unfamiliar terrain, and entropy flags likely errors.
 - **Pixel Mahalanobis at the expert sites**: median normalised distance 1.64 / 1.68 vs 1.14 on NOAH-H val crops. The default [0, 1] display clamp therefore saturates on expert observations; display raw distances with per-observation scaling.
 
+### E18 — Output link from Mucsányi, Da Costa & Hennig (NeurIPS 2025): normcdf head vs softmax (2026-10-14, clusters 17699289/90, `results/block_link_cv/summary.json`)
+Paper: "Rethinking Approximate Gaussian Inference in Classification" (arXiv:2502.03366).
+- **The paper's argument.** Softmax of a Gaussian over the logits has no closed form: Monte Carlo is noisy, and the multi-class probit is a heuristic.
+- **Its proposal.** p = normalize(Φ(f)) with per-class binary cross-entropy. E[Φ(f_k)] = Φ(μ_k/√(1+σ_k²)) is exact per class; the normalisation is a ratio of expectations. A moment-matched Dirichlet gives closed-form expected entropy and mutual information.
+- **Reported gains.** Slightly better NLL, ECE and accuracy on CIFAR and ImageNet. Applying the closed form post hoc to a softmax-trained network did not work (their App. K.1), so it needs retraining.
+
+**(a) λ per predictive, final model** (CPU refit from `block_features.npz`). Tuned on val NLL, λ is 31.6 for the Monte Carlo predictive and 10 for the closed-form probit. `best.laplace.pt` now stores 31.6 as its default.
+
+| test (531 blocks) | NLL | ECE |
+|---|---|---|
+| Monte Carlo, λ 10 | 1.139 | 0.058 |
+| Monte Carlo, λ 31.6 | 1.114 | 0.098 |
+| closed-form probit, λ 10 | 1.088 | 0.071 |
+| temperature scaling | **1.046** | 0.062 |
+
+- The exact Monte Carlo predictive of the last-layer posterior is worse than the probit heuristic on both val (1.216 vs 1.181) and test. Temperature scaling beats both.
+- The overconfidence comes from fine-tuning the features, which a last-layer posterior does not capture.
+- Monte Carlo mutual information got better at flagging wrong predictions: AUROC 0.663 → 0.701.
+
+**(b) normcdf head + per-class BCE vs softmax + CE**, retrained.
+- **Setup.** 3-fold spatial CV at the final recipe (12 epochs, segmenter LR ×3, τ 64.5, last epoch), one seed (42). The normcdf prior offset is α·Φ⁻¹(p̄), so both heads start from identical zero-shot predictions (fold val accuracy 0.118 / 0.114 / 0.084 for both).
+- **Uncertainty evaluation** (`eval_link_cv_fold.py`):
+  - The last-layer Laplace and Mahalanobis are fitted on each fold's training blocks.
+  - Inside each held-out fold, cross-fitting: temperature and λ (per predictive) are tuned on half the cells and scored on the other half, then swapped.
+  - 150 Oxia NOAH-H val crops serve as a different site.
+- **Data.** 2 536 held-out blocks, pooled.
+
+| head | predictive | accuracy | macro-F1 ≥ 5 | NLL | ECE | Brier |
+|---|---|---|---|---|---|---|
+| softmax | temperature | **0.658** | **0.455** | **1.045** | **0.023** | **0.476** |
+| softmax | Laplace closed-form probit | 0.659 | 0.454 | 1.059 | 0.045 | 0.476 |
+| softmax | Laplace MC | 0.658 | 0.454 | 1.082 | 0.068 | 0.481 |
+| normcdf | temperature | 0.650 | 0.444 | 1.109 | 0.050 | 0.493 |
+| normcdf | Laplace closed form (exact per class) | 0.650 | 0.444 | 1.150 | 0.045 | 0.491 |
+| normcdf | Laplace MC | 0.650 | 0.445 | 1.145 | 0.051 | 0.492 |
+
+Paired normcdf − softmax, cell bootstrap:
+
+| predictive | accuracy | macro-F1 ≥ 5 | NLL | Brier |
+|---|---|---|---|---|
+| temperature | −0.008 [−0.015, 0.000] | −0.011 [−0.028, +0.008] | **+0.064 [+0.046, +0.084]** | +0.016 |
+| Laplace closed form | −0.010 [−0.017, −0.002] | | **+0.091** | |
+| Laplace MC | −0.008 [−0.016, −0.001] | | **+0.063** | |
+
+- **Consistent across folds.** NLL is worse in every fold and every predictive (+0.05 … +0.11), and accuracy is lower in every fold (−0.006 … −0.012).
+- **Uncertainty scores: no gain.**
+
+  | score | softmax | normcdf |
+  |---|---|---|
+  | wrong-prediction AUROC, 1 − max p | 0.737 | 0.723 |
+  | wrong-prediction AUROC, mutual information (MC) | 0.667 | 0.600 |
+  | wrong-prediction AUROC, mutual information (Dirichlet) | — | 0.607 |
+  | Oxia AUROC, Mahalanobis | 0.998 | 0.996 |
+  | Oxia AUROC, mutual information (MC) | 0.932 | 0.914 |
+  | Oxia AUROC, mutual information (Dirichlet) | — | 0.875 |
+
+  The Dirichlet closed form works and avoids sampling, but it is not more informative than Monte Carlo.
+- **Decision: keep softmax + cross-entropy, with temperature-scaled probabilities, and use the last-layer Laplace for the aleatoric / epistemic split.**
+- **Likely reason.** With 2 000 blocks and 18 imbalanced classes, per-class BCE trains each rare class almost only on negatives. The paper's large, balanced datasets are a different regime. With 18 classes, Monte Carlo sampling costs nothing, so the paper's cost argument does not apply here.
+- The normcdf option stays in the code (`--link normcdf`; `BlockClassifier(link=...)`) for a larger future campaign.
+
 ## 7c. Stage 4 — what we learned, and what is open
 
 1. **The features transfer to new sites; NOAH-H's class mapping does not.** Zero-shot, the segmenter's dominant-class rule scores 0.018 val accuracy. A head on the frozen features reaches 0.58 after two probe epochs (E13).
@@ -549,7 +610,7 @@ Test set (531 blocks):
    - Val-selection optimism is 0.03–0.06.
 8. **Site shift is not a blur effect.** The expert imagery is sharper and noisier than the Oxia DRG, but blurring it to the Oxia spectrum does not change the zero-shot collapse (E14).
 
-Done since: the Laplace posterior and the uncertainty / neural-PCA files for the block model (E17).
+Done since: the Laplace posterior and the uncertainty / neural-PCA files for the block model (E17); the normcdf output link of Mucsányi et al. 2025, not adopted (E18).
 
 Open / next:
 - **Campaign 2 with the posterior as prior.** The Stage-4 trainer applies its prior to `model.seg` only; it needs to apply `campaign1_posterior_v2_final_lr3_e12.pt` over all BlockClassifier parameters at τ = 1.
@@ -587,6 +648,7 @@ Open / next:
 | logs | `job_outputs/block_finetune/`, `job_outputs/block_cv/`, wandb `ai4exomars_block_finetune` |
 | tests | `vision_backend/tests/test_block_head.py`, `test_laplace_prior.py`, `test_prep_expert_blocks.py` |
 | uncertainty / explainability files | `scripts/fit_block_artifacts.py`, `run_block_artifacts.{sh,sub}`, `vision_backend/uncertainty/block_laplace.py`, `vision_backend/tests/test_block_artifacts.py` → files and `README.md` next to the checkpoint, `results/block_artifacts/<run>.json`, `checkpoints/laplace/campaign1_posterior_<run>.pt` |
-| key commits | 55a165a (Stage 4), c88cae5 (calibration eval, Laplace prior), a0e3497 (1024 blocks, spatial CV), 840dd45 (uncertainty / explainability files) |
+| output-link comparison (E18) | `run_link_cv.{sh,sub}`, `scripts/eval_link_cv_fold.py`, `scripts/summarize_link_cv.py` → `results/block_link_cv/` |
+| key commits | 55a165a (Stage 4), c88cae5 (calibration eval, Laplace prior), a0e3497 (1024 blocks, spatial CV), 840dd45 (uncertainty / explainability files), 1e27b2b (normcdf link, E18 harness) |
 
 **Running the final model off the cluster**: the pushed repo code plus `best.pt` is all that is needed (`eval.json` holds T*). Call `load_block_classifier(path, device="cpu")`. This was checked on 2026-10-13 from a clean clone of 3e2cc21 with no GPU and no cluster files. On the login-node CPU, a 512 block took 11 s and a 1024 block 40 s. The `run_*.{sh,sub}` launchers are cluster-only.

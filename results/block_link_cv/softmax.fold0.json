@@ -1,0 +1,54 @@
+{
+  "checkpoint": "checkpoints/block_link_cv/softmax/fold0/best.pt",
+  "fold": 0,
+  "link": "softmax",
+  "n_train": 1510,
+  "n_heldout": 846,
+  "n_oxia": 150,
+  "heldout_accuracy_map": 0.6406619548797607,
+  "halves": [
+    {
+      "temperature": 1.5485808849334717,
+      "lambda_closed": 17.782794952392578,
+      "lambda_mc": 56.234130859375,
+      "grid_edge": {
+        "probit": false,
+        "mc": false
+      },
+      "n_calibration_blocks": 388,
+      "n_eval_blocks": 458
+    },
+    {
+      "temperature": 1.5322479009628296,
+      "lambda_closed": 17.782794952392578,
+      "lambda_mc": 31.62277603149414,
+      "grid_edge": {
+        "probit": false,
+        "mc": false
+      },
+      "n_calibration_blocks": 458,
+      "n_eval_blocks": 388
+    }
+  ],
+  "classes": [
+    "Smooth + Featureless",
+    "Smooth + Lineated",
+    "Textured non-bedrock",
+    "Smooth bedrock",
+    "Textured bedrock",
+    "Rugged bedrock",
+    "Fractured bedrock",
+    "Continous + Simple form large ripples",
+    "Isolated + Simple form large ripples",
+    "Rectilinear form large ripples",
+    "Continuous small ripples",
+    "Bedrock substrate + Non-continuous small ripples",
+    "Non-bedrock substrate + Non-continous small ripples",
+    "Boulder fields",
+    "Craters",
+    "Yardangs",
+    "Dunes",
+    "Periodic Bedrock Ridges"
+  ],
+  "seconds": 81
+}
