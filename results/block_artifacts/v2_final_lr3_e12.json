@@ -1,0 +1,713 @@
+{
+  "segmenter_pixel_level": {
+    "n_crops": 1500,
+    "pixels_per_class": {
+      "0": 5023,
+      "1": 5033,
+      "2": 5000,
+      "3": 5043,
+      "4": 5004,
+      "5": 5000,
+      "6": 5009,
+      "7": 5021,
+      "8": 5008,
+      "9": 5000,
+      "10": 5000,
+      "11": 5015,
+      "12": 5037,
+      "13": 0
+    },
+    "reference_max_distance": 20.50981330871582,
+    "npca": {
+      "0": {
+        "n": 33,
+        "explained_variance_ratio": [
+          0.3289,
+          0.1557,
+          0.1245,
+          0.0785
+        ]
+      },
+      "1": {
+        "n": 7,
+        "skipped": true
+      },
+      "2": {
+        "n": 200,
+        "explained_variance_ratio": [
+          0.2769,
+          0.1679,
+          0.1461,
+          0.0917
+        ]
+      },
+      "3": {
+        "n": 17,
+        "explained_variance_ratio": [
+          0.3688,
+          0.1878,
+          0.1198,
+          0.0803
+        ]
+      },
+      "4": {
+        "n": 200,
+        "explained_variance_ratio": [
+          0.2966,
+          0.2052,
+          0.1096,
+          0.0813
+        ]
+      },
+      "5": {
+        "n": 200,
+        "explained_variance_ratio": [
+          0.3214,
+          0.1828,
+          0.1343,
+          0.0725
+        ]
+      },
+      "6": {
+        "n": 200,
+        "explained_variance_ratio": [
+          0.2211,
+          0.1816,
+          0.1523,
+          0.1048
+        ]
+      },
+      "7": {
+        "n": 104,
+        "explained_variance_ratio": [
+          0.362,
+          0.1656,
+          0.0809,
+          0.0664
+        ]
+      },
+      "8": {
+        "n": 46,
+        "explained_variance_ratio": [
+          0.3258,
+          0.176,
+          0.1106,
+          0.0881
+        ]
+      },
+      "9": {
+        "n": 109,
+        "explained_variance_ratio": [
+          0.2278,
+          0.21,
+          0.1159,
+          0.0922
+        ]
+      },
+      "10": {
+        "n": 200,
+        "explained_variance_ratio": [
+          0.2181,
+          0.1706,
+          0.1512,
+          0.1069
+        ]
+      },
+      "11": {
+        "n": 5,
+        "skipped": true
+      },
+      "12": {
+        "n": 51,
+        "explained_variance_ratio": [
+          0.3678,
+          0.1733,
+          0.0849,
+          0.0764
+        ]
+      },
+      "13": {
+        "n": 0,
+        "skipped": true
+      }
+    },
+    "export_max_logit_difference": 0.0,
+    "median_normalised_pixel_distance": {
+      "NOAH-H val crops": 1.14084792137146,
+      "expert test ESP_027201_1750_RED": 1.6422173976898193,
+      "expert test ESP_075512_1900_RED": 1.6821985244750977
+    }
+  },
+  "block_feature_check": {
+    "train_accuracy_from_features": 0.790547263681592,
+    "val_accuracy_from_features": 0.6159695817490495,
+    "test_accuracy_from_features": 0.67984934086629
+  },
+  "block_level": {
+    "last_layer_laplace": {
+      "prior_precision": 10.0,
+      "lambda_grid_val_nll": [
+        [
+          9.999999747378752e-05,
+          2.241213083267212
+        ],
+        [
+          0.00017782794020604342,
+          2.2304136753082275
+        ],
+        [
+          0.0003162277571391314,
+          2.211416482925415
+        ],
+        [
+          0.000562341301701963,
+          2.183443307876587
+        ],
+        [
+          0.0010000000474974513,
+          2.149146318435669
+        ],
+        [
+          0.0017782794311642647,
+          2.1067330837249756
+        ],
+        [
+          0.003162277629598975,
+          2.056051254272461
+        ],
+        [
+          0.005623413249850273,
+          1.9972341060638428
+        ],
+        [
+          0.009999999776482582,
+          1.9305392503738403
+        ],
+        [
+          0.017782794311642647,
+          1.8564144372940063
+        ],
+        [
+          0.03162277489900589,
+          1.775840163230896
+        ],
+        [
+          0.05623413249850273,
+          1.6902774572372437
+        ],
+        [
+          0.10000000149011612,
+          1.6020152568817139
+        ],
+        [
+          0.17782793939113617,
+          1.5141044855117798
+        ],
+        [
+          0.3162277638912201,
+          1.4302128553390503
+        ],
+        [
+          0.5623413324356079,
+          1.3542789220809937
+        ],
+        [
+          1.0,
+          1.2899558544158936
+        ],
+        [
+          1.778279423713684,
+          1.2399481534957886
+        ],
+        [
+          3.1622776985168457,
+          1.205544352531433
+        ],
+        [
+          5.6234130859375,
+          1.1864651441574097
+        ],
+        [
+          10.0,
+          1.1810458898544312
+        ],
+        [
+          17.782794952392578,
+          1.1866440773010254
+        ],
+        [
+          31.62277603149414,
+          1.200070858001709
+        ],
+        [
+          56.234130859375,
+          1.2179447412490845
+        ],
+        [
+          100.0,
+          1.237106442451477
+        ],
+        [
+          177.82794189453125,
+          1.2551034688949585
+        ],
+        [
+          316.2277526855469,
+          1.2704663276672363
+        ],
+        [
+          562.34130859375,
+          1.2826441526412964
+        ],
+        [
+          1000.0,
+          1.2917451858520508
+        ],
+        [
+          1778.2794189453125,
+          1.2982337474822998
+        ],
+        [
+          3162.277587890625,
+          1.3026930093765259
+        ],
+        [
+          5623.4130859375,
+          1.3056745529174805
+        ],
+        [
+          10000.0,
+          1.3076268434524536
+        ],
+        [
+          17782.794921875,
+          1.308882236480713
+        ],
+        [
+          31622.77734375,
+          1.3096729516983032
+        ],
+        [
+          56234.1328125,
+          1.3101598024368286
+        ],
+        [
+          100000.0,
+          1.310453176498413
+        ],
+        [
+          177827.9375,
+          1.3106262683868408
+        ],
+        [
+          316227.78125,
+          1.3107270002365112
+        ],
+        [
+          562341.3125,
+          1.3107844591140747
+        ],
+        [
+          1000000.0,
+          1.3108172416687012
+        ]
+      ],
+      "lambda_at_grid_edge": false,
+      "temperature_val": 1.6099411992734336,
+      "test": {
+        "map": {
+          "accuracy": 0.67984934086629,
+          "nll": 1.2065598386002228,
+          "ece": 0.1432319392828218,
+          "brier": 0.4941931664943695,
+          "by_obs": {
+            "ESP_027201_1750_RED": {
+              "nll": 1.4354447435934057,
+              "ece": 0.2079928955734995
+            },
+            "ESP_075512_1900_RED": {
+              "nll": 1.0930845054205038,
+              "ece": 0.113454374327292
+            }
+          }
+        },
+        "map_temperature": {
+          "accuracy": 0.67984934086629,
+          "nll": 1.0462073993419476,
+          "ece": 0.062323686697676274,
+          "brier": 0.47057268023490906,
+          "by_obs": {
+            "ESP_027201_1750_RED": {
+              "nll": 1.1034141694917934,
+              "ece": 0.14040979575600562
+            },
+            "ESP_075512_1900_RED": {
+              "nll": 1.0178457330141368,
+              "ece": 0.07208565993204326
+            }
+          }
+        },
+        "laplace_probit": {
+          "accuracy": 0.6760828625235404,
+          "nll": 1.088185966956421,
+          "ece": 0.07102112575279301,
+          "brier": 0.47449982166290283,
+          "by_obs": {
+            "ESP_027201_1750_RED": {
+              "nll": 1.1448112416355698,
+              "ece": 0.14044767447436649
+            },
+            "ESP_075512_1900_RED": {
+              "nll": 1.0601125913408427,
+              "ece": 0.0601360345016009
+            }
+          }
+        },
+        "laplace_mc": {
+          "accuracy": 0.6817325800376648,
+          "nll": 1.1385353243421654,
+          "ece": 0.05806153761630285,
+          "brier": 0.470938116312027,
+          "by_obs": {
+            "ESP_027201_1750_RED": {
+              "nll": 1.2148947791347335,
+              "ece": 0.10814455449977024
+            },
+            "ESP_075512_1900_RED": {
+              "nll": 1.1006782425295116,
+              "ece": 0.050663909290603694
+            }
+          }
+        }
+      },
+      "oxia_vs_expert_test": {
+        "mean_mutual_information": {
+          "NOAH-H Oxia val crops": 1.3002655506134033,
+          "expert test": 0.4164740741252899
+        },
+        "auroc_mutual_information": 0.9688637790332706
+      }
+    },
+    "block_mahalanobis": {
+      "feature": "phi = [LN(z), p_bar]",
+      "feature_dim": 270,
+      "classes_fitted": [
+        0,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17
+      ],
+      "reference_max_distance": 24.251468658447266,
+      "median_normalised_distance": {
+        "train": 0.5955941677093506,
+        "val": 0.7105742692947388,
+        "test ESP_027201_1750_RED": 0.7902761101722717,
+        "test ESP_075512_1900_RED": 0.6009640693664551,
+        "NOAH-H Oxia val crops (other site)": 2.1436238288879395
+      },
+      "auroc_oxia_vs_expert_test": 0.9984180790960452
+    },
+    "misclassification_auroc_test": {
+      "1 - max p (temperature)": 0.7107707348867525,
+      "laplace entropy (probit)": 0.7177774156754114,
+      "laplace entropy (MC)": 0.7265439139644777,
+      "laplace mutual information (MC)": 0.6631741893433274,
+      "block Mahalanobis distance": 0.600065178425941
+    },
+    "block_npca": {
+      "Smooth + Featureless": {
+        "class_id": 0,
+        "n": 25,
+        "explained_variance_ratio": [
+          0.7198,
+          0.1953,
+          0.0352,
+          0.0209
+        ]
+      },
+      "Smooth + Lineated": {
+        "class_id": 1,
+        "n": 0,
+        "skipped": true
+      },
+      "Textured non-bedrock": {
+        "class_id": 2,
+        "n": 0,
+        "skipped": true
+      },
+      "Smooth bedrock": {
+        "class_id": 3,
+        "n": 30,
+        "explained_variance_ratio": [
+          0.4008,
+          0.1782,
+          0.1241,
+          0.0614
+        ]
+      },
+      "Textured bedrock": {
+        "class_id": 4,
+        "n": 284,
+        "explained_variance_ratio": [
+          0.3246,
+          0.1324,
+          0.1318,
+          0.0842
+        ]
+      },
+      "Rugged bedrock": {
+        "class_id": 5,
+        "n": 704,
+        "explained_variance_ratio": [
+          0.312,
+          0.1398,
+          0.1216,
+          0.083
+        ]
+      },
+      "Fractured bedrock": {
+        "class_id": 6,
+        "n": 27,
+        "explained_variance_ratio": [
+          0.3737,
+          0.2324,
+          0.1306,
+          0.0639
+        ]
+      },
+      "Continous + Simple form large ripples": {
+        "class_id": 7,
+        "n": 68,
+        "explained_variance_ratio": [
+          0.3037,
+          0.2036,
+          0.1196,
+          0.0624
+        ]
+      },
+      "Isolated + Simple form large ripples": {
+        "class_id": 8,
+        "n": 191,
+        "explained_variance_ratio": [
+          0.2519,
+          0.1363,
+          0.115,
+          0.077
+        ]
+      },
+      "Rectilinear form large ripples": {
+        "class_id": 9,
+        "n": 0,
+        "skipped": true
+      },
+      "Continuous small ripples": {
+        "class_id": 10,
+        "n": 19,
+        "explained_variance_ratio": [
+          0.3573,
+          0.21,
+          0.1196,
+          0.0787
+        ]
+      },
+      "Bedrock substrate + Non-continuous small ripples": {
+        "class_id": 11,
+        "n": 293,
+        "explained_variance_ratio": [
+          0.2571,
+          0.1849,
+          0.1332,
+          0.0821
+        ]
+      },
+      "Non-bedrock substrate + Non-continous small ripples": {
+        "class_id": 12,
+        "n": 29,
+        "explained_variance_ratio": [
+          0.3765,
+          0.1838,
+          0.1456,
+          0.0897
+        ]
+      },
+      "Boulder fields": {
+        "class_id": 13,
+        "n": 13,
+        "explained_variance_ratio": [
+          0.7065,
+          0.1367,
+          0.0688,
+          0.0405
+        ]
+      },
+      "Craters": {
+        "class_id": 14,
+        "n": 211,
+        "explained_variance_ratio": [
+          0.4336,
+          0.171,
+          0.0897,
+          0.0731
+        ]
+      },
+      "Yardangs": {
+        "class_id": 15,
+        "n": 3,
+        "skipped": true
+      },
+      "Dunes": {
+        "class_id": 16,
+        "n": 103,
+        "explained_variance_ratio": [
+          0.2394,
+          0.2005,
+          0.142,
+          0.1136
+        ]
+      },
+      "Periodic Bedrock Ridges": {
+        "class_id": 17,
+        "n": 10,
+        "explained_variance_ratio": [
+          0.3614,
+          0.2291,
+          0.1717,
+          0.097
+        ]
+      }
+    }
+  },
+  "campaign_posterior": {
+    "path": "checkpoints/laplace/campaign1_posterior_v2_final_lr3_e12.pt",
+    "n_expert_blocks": 2010,
+    "tau_noahh": 64.5,
+    "expert_fisher_per_block": {
+      "mean": 0.00016392437100876123,
+      "median": 5.649510057992302e-06
+    },
+    "seconds": 165
+  },
+  "checkpoint": "checkpoints/block_finetune/v2_final_lr3_e12/best.pt",
+  "manifest": "data/BlockLabels_prepared_v2/manifest.csv",
+  "created": "2026-10-14T08:16:00.710507+00:00",
+  "git_commit": "840dd45",
+  "classes": [
+    {
+      "id": 0,
+      "name": "Smooth + Featureless",
+      "noahh_dc_index": 0
+    },
+    {
+      "id": 1,
+      "name": "Smooth + Lineated",
+      "noahh_dc_index": 1
+    },
+    {
+      "id": 2,
+      "name": "Textured non-bedrock",
+      "noahh_dc_index": 2
+    },
+    {
+      "id": 3,
+      "name": "Smooth bedrock",
+      "noahh_dc_index": 3
+    },
+    {
+      "id": 4,
+      "name": "Textured bedrock",
+      "noahh_dc_index": 4
+    },
+    {
+      "id": 5,
+      "name": "Rugged bedrock",
+      "noahh_dc_index": 5
+    },
+    {
+      "id": 6,
+      "name": "Fractured bedrock",
+      "noahh_dc_index": 6
+    },
+    {
+      "id": 7,
+      "name": "Continous + Simple form large ripples",
+      "noahh_dc_index": 7
+    },
+    {
+      "id": 8,
+      "name": "Isolated + Simple form large ripples",
+      "noahh_dc_index": 8
+    },
+    {
+      "id": 9,
+      "name": "Rectilinear form large ripples",
+      "noahh_dc_index": 9
+    },
+    {
+      "id": 10,
+      "name": "Continuous small ripples",
+      "noahh_dc_index": 10
+    },
+    {
+      "id": 11,
+      "name": "Bedrock substrate + Non-continuous small ripples",
+      "noahh_dc_index": 11
+    },
+    {
+      "id": 12,
+      "name": "Non-bedrock substrate + Non-continous small ripples",
+      "noahh_dc_index": 12
+    },
+    {
+      "id": 13,
+      "name": "Boulder fields",
+      "noahh_dc_index": 13
+    },
+    {
+      "id": 14,
+      "name": "Craters",
+      "noahh_dc_index": null
+    },
+    {
+      "id": 15,
+      "name": "Yardangs",
+      "noahh_dc_index": null
+    },
+    {
+      "id": 16,
+      "name": "Dunes",
+      "noahh_dc_index": null
+    },
+    {
+      "id": 17,
+      "name": "Periodic Bedrock Ridges",
+      "noahh_dc_index": null
+    }
+  ],
+  "preprocessing": {
+    "input": "single-band HiRISE RED, raw DN, 0 = nodata, native 0.25 m/px",
+    "stretch": "u8 = clip(round(58 + (DN - p1) / (p99 - p1) * (178 - 58)), 1, 255), DN 0 -> 0, with p1/p99 the observation's 1st/99th DN percentiles (the labelling export's preprocessing bounds) -- scripts/prep_expert_block_manifest.py:to_uint8(stretch='oxia'). Matches the Oxia training contrast; the export's own 0-255 stretch has ~2x the contrast and must not be used.",
+    "model_input": "x = u8 / 127.5 - 1 as [B, 1, H, W], valid = (u8 != 0); blocks of 512 px, or multiples of 512 (tiled through the backbone at 512)"
+  },
+  "files": {
+    "best.pt": "block classifier: load_block_classifier(path) in vision_backend/train_stage4_block_finetune.py",
+    "eval.json": "test metrics; 'temperature' = T* for temperature-scaled probabilities softmax(logits / T)",
+    "best.laplace.pt": "last-layer Laplace (uncertainty/block_laplace.py): la = load_last_layer_laplace(path); phi, offset = model.block_features(x, valid); logits = offset + model.fc(phi); la.predictive(logits, phi, method='probit' | 'mc') -> probs, entropy (+ aleatoric, mutual_information with 'mc')",
+    "best.uncertainty.pt": "block Mahalanobis (MahalanobisStats over phi): uncertainty/malahanobis.py load_stats + mahalanobis_distance(phi, stats) / stats.reference_max_distance",
+    "best.npca.pt": "block neural-PCA bases (schema v2, gallery empty): pc_align/neural_pca.py load_gallery_bases(path)[k]; psi = compute_block_psi(model.fc.weight, phi, k); rank_indices_by_component(psi, bases[k]) ranks the observation's blocks",
+    "segmenter.pt": "the fine-tuned segmenter as a Stage-3 checkpoint (14 NOAH-H pixel classes): load_segmentation_model_from_checkpoint(path)",
+    "segmenter.uncertainty.pt": "pixel Mahalanobis of segmenter.pt (uncertainty_mapping.epistemic_uncertainty_map)",
+    "segmenter.npca.pt": "pixel neural-PCA bases of segmenter.pt (schema v2, gallery empty; psi = compute_psi_batch(seg, k, x))",
+    "block_features.npz": "phi / offset / label / block_id / cell per split; refit the block-level files with scripts/fit_block_artifacts.py --from-features"
+  }
+}
