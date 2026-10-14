@@ -44,7 +44,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from eval_block_classifier import brier, fit_temperature  # noqa: E402
+from eval_block_classifier import brier  # noqa: E402
 from vision_backend.block_dataset import DEFAULT_DC_CLASSES_JSON, BlockDataset, load_block_manifest  # noqa: E402
 from vision_backend.laplace_prior import mc_fisher_diagonal_blocks, save_prior  # noqa: E402
 from vision_backend.model.features import extract_pixel_features, get_classifier_weight_vector  # noqa: E402
@@ -52,7 +52,8 @@ from vision_backend.pc_align.neural_pca import compute_block_psi, fit_class_pca,
 from vision_backend.seg_dataset import IGNORE_INDEX, SegmentationCropDataset, load_seg_records  # noqa: E402
 from vision_backend.train_stage4_block_finetune import load_block_classifier, make_loader, summarize  # noqa: E402
 from vision_backend.training.builders import load_segmentation_model_from_checkpoint  # noqa: E402
-from vision_backend.uncertainty.block_laplace import (LastLayerLaplace, save_last_layer_laplace,  # noqa: E402
+from vision_backend.uncertainty.block_laplace import (LastLayerLaplace, fit_temperature,  # noqa: E402
+                                                      link_log_probs, save_last_layer_laplace,
                                                       tune_prior_precision)
 from vision_backend.uncertainty.malahanobis import (fit_class_gaussians, mahalanobis_distance,  # noqa: E402
                                                    mahalanobis_distance_map, save_stats)
@@ -78,6 +79,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--min-npca-samples", type=int, default=10)
     ap.add_argument("--n-components", type=int, default=4)
     ap.add_argument("--mc-samples", type=int, default=2000)
+    ap.add_argument("--mc-samples-tune", type=int, default=1000, help="MC samples per lambda in the val sweep")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=0)
@@ -244,7 +246,8 @@ def tiles_512(images: list[torch.Tensor]) -> list[torch.Tensor]:
 
 
 # --------------------------------------------------------------------------- block level
-def fit_block_level(feats: dict, wb: torch.Tensor, classes, run_dir: Path, args, device, extra: dict) -> dict:
+def fit_block_level(feats: dict, wb: torch.Tensor, classes, run_dir: Path, args, device, extra: dict,
+                    link: str = "softmax") -> dict:
     """Last-layer Laplace, block Mahalanobis and block neural-PCA bases, with checks."""
     W, b = wb[:, :-1], wb[:, -1]
     t = {s: {k: torch.from_numpy(v) for k, v in feats[s].items() if k not in ("block_id", "cell")} for s in SPLITS}
@@ -255,23 +258,29 @@ def fit_block_level(feats: dict, wb: torch.Tensor, classes, run_dir: Path, args,
 
     # --- last-layer Laplace
     t0 = time.time()
-    la = LastLayerLaplace.fit(t["train"]["phi"].to(device), logits["train"].to(device), wb,
+    la = LastLayerLaplace.fit(t["train"]["phi"].to(device), logits["train"].to(device), wb, link=link,
                               meta={"fitted_on": "train split", "n_blocks": int(len(y["train"]))})
-    lam, table = tune_prior_precision(la.to(device), logits["val"].to(device), t["val"]["phi"].to(device),
-                                      y["val"].to(device))
+    # lambda is tuned separately for each predictive on its own val NLL; the stored default is the
+    # Monte Carlo one (unbiased for any link, and the one that gives mutual information)
+    val_args = (logits["val"].to(device), t["val"]["phi"].to(device), y["val"].to(device))
+    lam_cf, table_cf = tune_prior_precision(la.to(device), *val_args, method="probit")
+    lam, table = tune_prior_precision(la.to(device), *val_args, method="mc", n_samples=args.mc_samples_tune,
+                                      seed=args.seed)
     la.prior_precision = lam
-    la.meta["prior_precision_tuned_on"] = "val NLL (probit)"
+    la.meta.update({"prior_precision_tuned_on": "val NLL of the Monte Carlo predictive",
+                    "prior_precision_probit": lam_cf})
     save_last_layer_laplace(la, run_dir / "best.laplace.pt")
-    edge = lam in (table[0][0], table[-1][0])
-    print(f"[block] last-layer Laplace: GGN {la.eigvecs.shape[0]} params, lambda* {lam:.3g} on val "
-          f"({'AT THE GRID EDGE' if edge else 'interior'}), {time.time() - t0:.0f}s")
-    T = fit_temperature(logits["val"].numpy(), y["val"].numpy())
+    edge = {"mc": lam in (table[0][0], table[-1][0]), "probit": lam_cf in (table_cf[0][0], table_cf[-1][0])}
+    print(f"[block] last-layer Laplace ({link}): GGN {la.eigvecs.shape[0]} params, lambda* on val: MC {lam:.3g}, "
+          f"probit {lam_cf:.3g} (grid edge: {edge}), {time.time() - t0:.0f}s")
+    T = fit_temperature(logits["val"], y["val"], link)
     lad = la.to(device)
     g = torch.Generator().manual_seed(args.seed)
     test_phi, test_logits = t["test"]["phi"].to(device), logits["test"].to(device)
-    probit = lad.predictive(test_logits, test_phi, method="probit")
+    probit = lad.predictive(test_logits, test_phi, method="probit", prior_precision=lam_cf)
     mc = lad.predictive(test_logits, test_phi, method="mc", n_samples=args.mc_samples, generator=g)
-    variants = {"map": logits["test"].numpy(), "map_temperature": logits["test"].numpy() / T,
+    variants = {"map": link_log_probs(logits["test"], link).numpy(),
+                "map_temperature": link_log_probs(logits["test"] / T, link).numpy(),
                 "laplace_probit": np.log(probit["probs"].cpu().numpy().clip(1e-12)),
                 "laplace_mc": np.log(mc["probs"].cpu().numpy().clip(1e-12))}
     yt = y["test"].numpy()
@@ -281,15 +290,16 @@ def fit_block_level(feats: dict, wb: torch.Tensor, classes, run_dir: Path, args,
         calib[name] = {"accuracy": m["accuracy"], "nll": m["nll"], "ece": m["ece"], "brier": brier(z, yt),
                        "by_obs": {o: {k: summarize(z[obs == o], yt[obs == o], classes)[k] for k in ("nll", "ece")}
                                   for o in sorted(set(obs))}}
-    out["last_layer_laplace"] = {"prior_precision": lam, "lambda_grid_val_nll": table, "lambda_at_grid_edge": edge,
-                                 "temperature_val": T, "test": calib}
+    out["last_layer_laplace"] = {"link": link, "prior_precision": lam, "prior_precision_probit": lam_cf,
+                                 "lambda_grid_val_nll": {"mc": table, "probit": table_cf},
+                                 "lambda_at_grid_edge": edge, "temperature_val": T, "test": calib}
 
     # --- block Mahalanobis
     stats = fit_class_gaussians(t["train"]["phi"], y["train"], shared_covariance=True)
     save_stats(stats, run_dir / "best.uncertainty.pt")
     dist = {s: mahalanobis_distance(t[s]["phi"], stats).numpy() / stats.reference_max_distance for s in SPLITS}
     wrong = variants["map"].argmax(1) != yt
-    pt = torch.softmax(torch.from_numpy(variants["map_temperature"]), 1).numpy()
+    pt = np.exp(variants["map_temperature"])
     out["block_mahalanobis"] = {
         "feature": "phi = [LN(z), p_bar]", "feature_dim": int(stats.feature_dim),
         "classes_fitted": sorted(int(c) for c in stats.class_stats),
@@ -450,7 +460,8 @@ def main() -> None:
                      == feats[s]["label"]).mean())
         summary.setdefault("block_feature_check", {})[f"{s}_accuracy_from_features"] = acc
     print(f"[block] accuracy recomputed from the features: {summary['block_feature_check']}")
-    summary["block_level"] = fit_block_level(feats, wb, classes, run_dir, args, device, extra)
+    summary["block_level"] = fit_block_level(feats, wb, classes, run_dir, args, device, extra,
+                                             link=ckpt["head_config"].get("link", "softmax"))
 
     if not args.skip_fisher and not args.from_features:
         out = Path(args.posterior_out or f"checkpoints/laplace/campaign1_posterior_{run_dir.name}.pt")

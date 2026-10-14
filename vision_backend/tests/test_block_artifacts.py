@@ -21,7 +21,8 @@ from vision_backend.model.block_head import BlockClassifier
 from vision_backend.pc_align.neural_pca import (compute_block_psi, fit_class_pca, load_gallery, load_gallery_bases,
                                                 save_gallery)
 from vision_backend.training.builders import build_simmim_segmentation_model
-from vision_backend.uncertainty.block_laplace import (LastLayerLaplace, last_layer_ggn, load_last_layer_laplace,
+from vision_backend.uncertainty.block_laplace import (LastLayerLaplace, dirichlet_from_normcdf, fit_temperature,
+                                                      last_layer_ggn, load_last_layer_laplace, normcdf_moments,
                                                       save_last_layer_laplace, tune_prior_precision)
 from vision_backend.uncertainty.malahanobis import (fit_class_gaussians, mahalanobis_distance,
                                                    mahalanobis_distance_map)
@@ -213,3 +214,174 @@ def test_fit_block_artifacts_script_end_to_end(tmp_path):
     subprocess.run(cmd + ["--from-features"], cwd=REPO, check=True, capture_output=True)
     assert all((run / f).is_file() for f in ("best.laplace.pt", "best.uncertainty.pt", "best.npca.pt"))
     torch.testing.assert_close(load_last_layer_laplace(run / "best.laplace.pt").eigvals, la.eigvals)
+
+
+# --------------------------------------------------------------------------- normcdf head (E18)
+def test_normcdf_head_starts_as_the_dominant_class_rule_and_matches_softmax_at_init():
+    from vision_backend.model.block_head import block_log_probs
+    torch.manual_seed(0)
+    seg = build_simmim_segmentation_model(dict(CFG)).eval()
+    soft = BlockClassifier(seg, list(range(5)) + [None, None]).eval()
+    norm = BlockClassifier(seg, list(range(5)) + [None, None], link="normcdf").eval()
+    x = torch.randn(2, 1, 256, 256)
+    with torch.no_grad():
+        p_soft = block_log_probs(soft(x), "softmax").exp()
+        p_norm = block_log_probs(norm(x), "normcdf").exp()
+    torch.testing.assert_close(p_norm, p_soft, atol=1e-4, rtol=0)
+
+
+def test_normcdf_bce_loss_and_fisher():
+    from vision_backend.train_stage4_block_finetune import block_loss
+    torch.manual_seed(0)
+    f = torch.randn(5, 4, requires_grad=True)
+    y = torch.tensor([0, 1, 2, 3, 1])
+    w = torch.tensor([1.0, 2.0, 0.5, 1.0])
+    p = torch.distributions.Normal(0, 1).cdf(f)
+    ref = F.binary_cross_entropy(p, F.one_hot(y, 4).float(), reduction="none").sum(1)
+    torch.testing.assert_close(block_loss(f, y, "normcdf", w), (w[y] * ref).sum() / w[y].sum())
+    torch.testing.assert_close(block_loss(f, y, "softmax", w), F.cross_entropy(f, y, weight=w))
+    # GGN of the per-class Bernoulli(Phi(f)) likelihood against autograd: the Fisher in logit space
+    # is E_y[grad grad^T] = diag(phi(f)^2 / (Phi(f) (1 - Phi(f))))
+    phi, logits = torch.randn(3, 2, dtype=torch.float64), torch.randn(3, 4, dtype=torch.float64)
+    ggn = last_layer_ggn(phi, logits, link="normcdf")
+    expected = torch.zeros_like(ggn)
+    for n in range(3):
+        fn = logits[n].clone().requires_grad_(True)
+        pc = torch.distributions.Normal(0, 1).cdf(fn)
+        fish = torch.zeros(4, dtype=torch.float64)
+        for k in range(4):
+            g1, = torch.autograd.grad(torch.log(pc[k]), fn, retain_graph=True)
+            g0, = torch.autograd.grad(torch.log(1 - pc[k]), fn, retain_graph=True)
+            fish[k] = pc[k].detach() * g1[k] ** 2 + (1 - pc[k].detach()) * g0[k] ** 2
+        x = torch.cat([phi[n], torch.ones(1, dtype=torch.float64)])
+        expected += torch.kron(torch.diag(fish), torch.outer(x, x))
+    torch.testing.assert_close(ggn, expected)
+
+
+def test_normcdf_closed_form_and_dirichlet_against_monte_carlo():
+    g = torch.Generator().manual_seed(0)
+    mu = torch.randn(6, 5, generator=g, dtype=torch.float64) * 1.5
+    var = torch.rand(6, 5, generator=g, dtype=torch.float64) * 3
+    m1, m2 = normcdf_moments(mu, var)
+    f = mu[None] + var.sqrt()[None] * torch.randn(200000, 6, 5, generator=g, dtype=torch.float64)
+    q = torch.distributions.Normal(0, 1).cdf(f)
+    torch.testing.assert_close(m1, q.mean(0), atol=4e-3, rtol=0)
+    torch.testing.assert_close(m2, (q ** 2).mean(0), atol=4e-3, rtol=0)
+    gamma = dirichlet_from_normcdf(mu, var)
+    torch.testing.assert_close(gamma / gamma.sum(1, keepdim=True), m1 / m1.sum(1, keepdim=True))
+    assert (gamma > 0).all()
+    # the Laplace "probit" predictive of a normcdf head: per class exact, normalised by a ratio of
+    # expectations -- close to the Monte Carlo predictive for a posterior of realistic width
+    la, phi, logits = _laplace()
+    la.link = "normcdf"
+    cf = la.predictive(logits, phi, method="probit", prior_precision=20.0)["probs"]
+    mc = la.predictive(logits, phi, method="mc", prior_precision=20.0, n_samples=20000,
+                       generator=torch.Generator().manual_seed(1))["probs"]
+    torch.testing.assert_close(cf, mc, atol=0.03, rtol=0)
+    broad = la.predictive(logits, phi, method="mc", prior_precision=0.5, n_samples=200,
+                          generator=torch.Generator().manual_seed(1))["probs"]
+    assert torch.isfinite(broad).all()  # every Phi underflowing must not give 0/0
+    d = la.predictive(logits, phi, method="dirichlet", prior_precision=20.0)
+    torch.testing.assert_close(d["probs"], cf, atol=1e-5, rtol=0)
+    assert (d["mutual_information"] >= 0).all()
+
+
+def test_temperature_fit_matches_the_evaluation_script():
+    sys.path.insert(0, str(REPO / "scripts"))
+    from eval_block_classifier import fit_temperature as fit_t_eval
+    g = torch.Generator().manual_seed(0)
+    logits = 3 * torch.randn(200, 6, generator=g)
+    labels = torch.randint(0, 6, (200,), generator=g)
+    assert abs(fit_temperature(logits, labels, "softmax") - fit_t_eval(logits.numpy(), labels.numpy())) < 1e-3
+
+
+def test_mc_lambda_tuning_uses_common_random_numbers():
+    la, phi, logits = _laplace()
+    labels = torch.distributions.Categorical(logits=logits).sample()
+    a = tune_prior_precision(la, logits, phi, labels, grid=torch.logspace(-1, 2, 4), method="mc", n_samples=64)
+    b = tune_prior_precision(la, logits, phi, labels, grid=torch.logspace(-1, 2, 4), method="mc", n_samples=64)
+    assert a == b
+
+
+def test_stage4_trainer_with_normcdf_link(tmp_path, monkeypatch):
+    """main() with --link normcdf: zero-shot eval, a probe epoch, checkpoint with the link, test split."""
+    rasterio = __import__("pytest").importorskip("rasterio")
+    from vision_backend import train_stage4_block_finetune as stage4
+    from vision_backend.train_stage4_block_finetune import load_block_classifier
+
+    torch.manual_seed(0)
+    seg = build_simmim_segmentation_model(dict(CFG, num_classes=3))
+    torch.save({"model_state": seg.state_dict(), "config": {"model": dict(CFG)}}, tmp_path / "seg.pt")
+    rng = np.random.default_rng(0)
+    profile = {"driver": "GTiff", "width": 1024, "height": 1024, "count": 1, "dtype": "uint8"}
+    with rasterio.open(tmp_path / "mosaic.tif", "w", **profile) as ds:
+        ds.write(rng.integers(1, 256, size=(1024, 1024), dtype=np.uint8), 1)
+    with (tmp_path / "blocks.csv").open("w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["col", "row", "label", "split"])
+        for i, (label, split) in enumerate([("1", "train"), ("Crater", "train"), ("2", "train"),
+                                            ("Crater", "val"), ("1", "val"), ("3", "test")]):
+            w.writerow([(i % 3) * 256, (i // 3) * 256, label, split])
+    dc = tmp_path / "dc.json"
+    dc.write_text(json.dumps({"classes": [{"id": i + 1, "name": n} for i, n in enumerate(["A", "B", "C"])]}))
+    monkeypatch.setattr(sys, "argv", [
+        "stage4", "--seg-checkpoint", str(tmp_path / "seg.pt"), "--manifest", str(tmp_path / "blocks.csv"),
+        "--imagery-path", str(tmp_path / "mosaic.tif"), "--dc-classes-json", str(dc), "--link", "normcdf",
+        "--out-dir", str(tmp_path / "out"), "--epochs", "1", "--probe-epochs", "1", "--batch-size", "2",
+        "--num-workers", "0", "--expect-new-classes", "1", "--jitter", "16", "--block-size", "256"])
+    stage4.main()
+    metrics = json.loads((tmp_path / "out" / "metrics.json").read_text())
+    assert np.isfinite(metrics["best_val"]["nll"]) and "test" in metrics
+    model, ckpt = load_block_classifier(tmp_path / "out" / "best.pt")
+    assert ckpt["head_config"]["link"] == "normcdf" and model.link == "normcdf"
+
+
+def test_link_cv_fold_evaluation_and_summary(tmp_path):
+    """eval_link_cv_fold.py on tiny softmax and normcdf models (no Oxia crops), then summarize_link_cv.py."""
+    names = [f"DC{i}" for i in range(5)] + ["NewA", "NewB"]
+    seg_index = list(range(5)) + [None, None]
+    (tmp_path / "block_classes.json").write_text(json.dumps(
+        {"classes": [{"name": n, "seg_index": s} for n, s in zip(names, seg_index)]}))
+    dc = tmp_path / "dc.json"
+    dc.write_text(json.dumps({"classes": [{"id": i + 1, "name": f"DC{i}"} for i in range(5)]}))
+    rng = np.random.default_rng(0)
+    (tmp_path / "crops").mkdir()
+    rows = []
+    for i in range(48):
+        img = f"crops/b{i}.png"
+        Image.fromarray(rng.integers(1, 255, (256, 256)).astype(np.uint8)).save(tmp_path / img)
+        rows.append({"image": img, "block_id": f"b{i:02d}", "size": 256, "label": names[i % 7],
+                     "split": "train" if i % 6 else "val", "obs_id": "OBS", "cell": f"OBS:{i // 2}:0",
+                     "fold": str((i // 2) % 3), "cv_buffer": ""})
+    with (tmp_path / "manifest.csv").open("w", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=list(rows[0]))
+        wr.writeheader()
+        wr.writerows(rows)
+    for link in ("softmax", "normcdf"):
+        torch.manual_seed(0)
+        seg = build_simmim_segmentation_model(dict(CFG)).eval()
+        model = BlockClassifier(seg, seg_index, link=link).eval()
+        with torch.no_grad():
+            model.fc.weight.normal_(0, 0.3)
+        (tmp_path / link).mkdir()
+        torch.save({"block_state": model.state_dict(), "seg_model_config": dict(CFG),
+                    "classes": {"names": names, "seg_index": seg_index},
+                    "head_config": {"attn_hidden": 128, "dropout": 0.1, "tile_size": 256, "link": link},
+                    "source_checkpoint": "unused", "epoch": 1,
+                    "args": {"manifest": str(tmp_path / "manifest.csv"),
+                             "block_classes": str(tmp_path / "block_classes.json"), "dc_classes_json": str(dc)}},
+                   tmp_path / link / "best.pt")
+        for f in range(3):
+            subprocess.run([sys.executable, str(REPO / "scripts" / "eval_link_cv_fold.py"), str(tmp_path / link / "best.pt"),
+                            "--fold", str(f), "--out", str(tmp_path / "res" / f"{link}.fold{f}"), "--oxia-crops", "0",
+                            "--num-workers", "0", "--mc-samples", "64", "--mc-samples-tune", "32"],
+                           cwd=REPO, check=True, capture_output=True)
+    z = np.load(tmp_path / "res" / "normcdf.fold0.npz")
+    assert {"p_laplace_closed", "p_laplace_mc", "s_mutual_information_dirichlet"} <= set(z.files)
+    assert np.allclose(z["p_laplace_closed"].sum(1), 1, atol=1e-5)
+    subprocess.run([sys.executable, str(REPO / "scripts" / "summarize_link_cv.py"), "--in-dir", str(tmp_path / "res"),
+                    "--n-boot", "20"], cwd=REPO, check=True, capture_output=True)
+    summary = json.loads((tmp_path / "res" / "summary.json").read_text())
+    assert summary["n_heldout_blocks"] == 48
+    assert set(summary["paired_difference"]["by_predictive"]) == {"map", "map_temperature", "laplace_closed",
+                                                                 "laplace_mc"}

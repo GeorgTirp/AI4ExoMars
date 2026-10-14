@@ -1,0 +1,25 @@
+# E18 output-link CV for the Stage-4 head (run_link_cv.sh).
+#   LINK=normcdf condor_submit_bid 20 run_link_cv.sub
+universe   = vanilla
+initialdir = /home/gtirpitz/AI4ExoMars
+executable = run_link_cv.sh
+LINK = $ENV(LINK:NOTSET)
+output = job_outputs/block_link_cv/$(LINK).$(Cluster).out
+error  = job_outputs/block_link_cv/$(LINK).$(Cluster).err
+log    = job_outputs/block_link_cv/$(LINK).$(Cluster).log
+request_cpus   = 8
+request_memory = 24576
+request_gpus   = 1
+min_gpu_mem_mb = 40000
+requirements   = (TARGET.CUDAGlobalMemoryMb >= $(min_gpu_mem_mb)) && \
+                 (TARGET.CUDADeviceName == "NVIDIA A100-SXM4-40GB") && \
+                 (TARGET.Machine =!= MY.LastRemoteHost) && \
+                 (TARGET.Machine != "g155.internal.cluster.is.localnet")
+getenv = True
++JobBatchName = "ai4exomars-link-cv"
+MaxTime = 10800
+periodic_hold = (JobStatus == 2) && ((CurrentTime - JobCurrentStartDate) >= $(MaxTime))
+periodic_hold_reason = "Job runtime exceeded MaxTime"
+on_exit_hold = (ExitCode != 0)
+on_exit_hold_reason = "Link CV exited non-zero -- check the .err log"
+queue 1

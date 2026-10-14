@@ -21,6 +21,16 @@ Initialised with alpha = 1, w = 0 and b = 0 for NOAH-H classes, the classifier
 any block training: epoch 0 is a zero-shot baseline on the NOAH-H classes, and
 fine-tuning starts from it instead of from a random head. New classes start at
 b = new_class_init_logit (default log(1/K)) and are learned through w.
+
+Output link (`link`): "softmax" (p = softmax(logits), trained with cross-entropy)
+or "normcdf" (p = Phi(f) / sum_c Phi(f_c), trained with per-class binary
+cross-entropy on Phi(f_k); Mucsanyi, Da Costa & Hennig, "Rethinking
+Approximate Gaussian Inference in Classification", NeurIPS 2025). With a
+Gaussian over the logits, the normcdf predictive has the exact closed form
+E[Phi(f_k)] = Phi(mu_k / sqrt(1 + var_k)) (uncertainty/block_laplace.py). For
+normcdf the prior enters as alpha * Phi^-1(pbar_k), so the initial head is
+again exactly the dominant-class rule (Phi(Phi^-1(pbar)) = pbar), and new
+classes start at Phi^-1(1/K).
 """
 from __future__ import annotations
 
@@ -30,6 +40,19 @@ from typing import Optional, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+LINKS = ("softmax", "normcdf")
+
+
+def block_log_probs(logits: torch.Tensor, link: str = "softmax") -> torch.Tensor:
+    """Class log-probabilities [B, K] from block logits under the head's output link."""
+    logits = logits.float()
+    if link == "softmax":
+        return F.log_softmax(logits, dim=1)
+    if link == "normcdf":
+        log_q = torch.special.log_ndtr(logits)
+        return log_q - torch.logsumexp(log_q, dim=1, keepdim=True)
+    raise ValueError(f"unknown link {link!r} ({' | '.join(LINKS)})")
 
 
 class GatedAttentionPool2d(nn.Module):
@@ -72,8 +95,12 @@ class BlockClassifier(nn.Module):
         dropout: float = 0.1,
         new_class_init_logit: Optional[float] = None,
         tile_size: Optional[int] = 512,
+        link: str = "softmax",
     ):
         super().__init__()
+        if link not in LINKS:
+            raise ValueError(f"unknown link {link!r} ({' | '.join(LINKS)})")
+        self.link = link
         # Blocks larger than tile_size (e.g. 1024 expert blocks) go through the
         # backbone as tile_size tiles -- the input size it was trained on, 0.25 m
         # GSD kept -- and the tiles' decoder features are stitched back into one
@@ -113,7 +140,12 @@ class BlockClassifier(nn.Module):
         nn.init.zeros_(self.fc.weight)
         nn.init.zeros_(self.fc.bias)
         self.prior_scale = nn.Parameter(torch.ones(()))
-        init = math.log(1.0 / num_classes) if new_class_init_logit is None else float(new_class_init_logit)
+        if new_class_init_logit is not None:
+            init = float(new_class_init_logit)
+        elif link == "normcdf":
+            init = float(torch.special.ndtri(torch.tensor(1.0 / num_classes)))
+        else:
+            init = math.log(1.0 / num_classes)
         self.class_bias = nn.Parameter(
             torch.tensor([0.0 if s is not None else init for s in self.seg_index])
         )
@@ -163,5 +195,10 @@ class BlockClassifier(nn.Module):
         log_pbar = torch.logsumexp((log_p + log_w).flatten(2), dim=2) - torch.log(total)[:, None]
 
         z = self.dropout(self.norm(self.pool(feats, weight)))
-        prior = log_pbar[:, self.prior_src] * self.prior_mask    # [B, K], 0 for new classes
+        if self.link == "normcdf":
+            # probit of the mean probability: Phi(prior_k) = pbar_k at alpha = 1
+            pbar = log_pbar.exp().clamp(1e-6, 1.0 - 1e-6)
+            prior = torch.special.ndtri(pbar)[:, self.prior_src] * self.prior_mask
+        else:
+            prior = log_pbar[:, self.prior_src] * self.prior_mask    # [B, K], 0 for new classes
         return torch.cat([z, log_pbar.exp()], dim=1), self.prior_scale * prior + self.class_bias

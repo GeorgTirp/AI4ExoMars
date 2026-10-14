@@ -105,6 +105,9 @@ def main() -> None:
     if ckpt["classes"]["names"] != classes.names:
         raise SystemExit("checkpoint class list differs from the manifest's")
     base = int(ckpt["head_config"].get("tile_size", 512))
+    if ckpt["head_config"].get("link", "softmax") != "softmax":
+        raise SystemExit("this evaluation assumes a softmax head (temperature, NLL on log-softmax); "
+                         "use scripts/fit_block_artifacts.py or eval_link_cv_fold.py for a normcdf head")
 
     out = {"checkpoint": str(ckpt_path), "epoch": ckpt.get("epoch"), "manifest": args.manifest}
     preds = {}

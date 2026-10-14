@@ -37,7 +37,7 @@ from torch.utils.data import DataLoader
 try:
     from vision_backend.block_dataset import (DEFAULT_DC_CLASSES_JSON, BlockClasses, BlockDataset,
                                               SizeGroupedBatchSampler, load_block_manifest)
-    from vision_backend.model.block_head import BlockClassifier
+    from vision_backend.model.block_head import LINKS, BlockClassifier, block_log_probs
     from vision_backend.model.optimizers import build_routed_muon_nadam_optimizer, create_cosine_scheduler_with_warmup
     from vision_backend.training.builders import build_simmim_segmentation_model, load_segmentation_model_from_checkpoint
     from vision_backend.training.utils import compute_class_weights, count_parameters, set_seed
@@ -46,7 +46,7 @@ try:
 except ModuleNotFoundError:
     from block_dataset import (DEFAULT_DC_CLASSES_JSON, BlockClasses, BlockDataset,
                                SizeGroupedBatchSampler, load_block_manifest)
-    from model.block_head import BlockClassifier
+    from model.block_head import LINKS, BlockClassifier, block_log_probs
     from model.optimizers import build_routed_muon_nadam_optimizer, create_cosine_scheduler_with_warmup
     from training.builders import build_simmim_segmentation_model, load_segmentation_model_from_checkpoint
     from training.utils import compute_class_weights, count_parameters, set_seed
@@ -92,6 +92,9 @@ def parse_args() -> argparse.Namespace:
                    choices=("none", "inverse_sqrt", "inverse", "effective_number"))
     p.add_argument("--class-weight-clip-max", type=float, default=10.0)
     p.add_argument("--label-smoothing", type=float, default=0.0)
+    p.add_argument("--link", choices=LINKS, default="softmax",
+                   help="Output link: softmax + cross-entropy, or normcdf + per-class binary cross-entropy "
+                        "(closed-form Gaussian-logit predictive; model/block_head.py).")
     p.add_argument("--head-dropout", type=float, default=0.1)
     p.add_argument("--attn-hidden", type=int, default=128)
     p.add_argument("--jitter", type=int, default=32, help="Training shift (px) for mosaic blocks.")
@@ -178,6 +181,24 @@ def summarize(logits: np.ndarray, labels: np.ndarray, classes: BlockClasses, *, 
     }
 
 
+def block_loss(logits: torch.Tensor, label: torch.Tensor, link: str, weight=None,
+               label_smoothing: float = 0.0) -> torch.Tensor:
+    """Class-weighted training loss: cross-entropy for softmax; for normcdf the
+    per-class binary cross-entropy of Phi(f_k) against the one-hot label, summed
+    over classes, weighted per block like F.cross_entropy (sum w_y l / sum w_y)."""
+    logits = logits.float()
+    if link == "softmax":
+        return F.cross_entropy(logits, label, weight=weight, label_smoothing=label_smoothing)
+    if label_smoothing:
+        raise ValueError("label smoothing is only implemented for the softmax link")
+    y = F.one_hot(label, logits.shape[1]).float()
+    nll = -(y * torch.special.log_ndtr(logits) + (1.0 - y) * torch.special.log_ndtr(-logits)).sum(1)
+    if weight is None:
+        return nll.mean()
+    w = weight[label]
+    return (w * nll).sum() / w.sum()
+
+
 @torch.no_grad()
 def predict(model, loader, device, amp: bool) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
@@ -212,7 +233,7 @@ def load_block_classifier(path: str | Path, device: str = "cpu") -> tuple[BlockC
     head = ckpt["head_config"]
     model = BlockClassifier(seg_model, ckpt["classes"]["seg_index"],
                             attn_hidden=head["attn_hidden"], dropout=head["dropout"],
-                            tile_size=head.get("tile_size", 512))
+                            tile_size=head.get("tile_size", 512), link=head.get("link", "softmax"))
     model.load_state_dict(ckpt["block_state"])
     return model.to(device).eval(), ckpt
 
@@ -287,7 +308,7 @@ def main() -> None:
     if num_seg != K - classes.num_new:
         raise SystemExit(f"segmenter has {num_seg} classes, the class list has {K - classes.num_new} NOAH-H classes")
     model = BlockClassifier(seg_model, classes.seg_index, attn_hidden=args.attn_hidden,
-                            dropout=args.head_dropout, tile_size=args.block_size).to(device)
+                            dropout=args.head_dropout, tile_size=args.block_size, link=args.link).to(device)
     print(f"[stage4] segmenter {args.seg_checkpoint}: {count_parameters(model.seg):,} params; "
           f"block head {sum(p.numel() for p in model.head_parameters()):,} params")
 
@@ -307,7 +328,8 @@ def main() -> None:
 
     def evaluate(split: str) -> dict:
         logits, labels = predict(model, loaders[split], device, amp)
-        return summarize(logits, labels, classes, min_support=args.select_min_support)
+        log_p = block_log_probs(torch.from_numpy(logits), args.link).numpy()
+        return summarize(log_p, labels, classes, min_support=args.select_min_support)
 
     def scalars(prefix: str, m: dict) -> dict:
         return {f"{prefix}/{k}": v for k, v in m.items() if isinstance(v, (int, float))}
@@ -370,7 +392,7 @@ def main() -> None:
             label = batch["label"].to(device, non_blocking=True)
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
                 logits = model(image, valid)
-            loss = F.cross_entropy(logits.float(), label, weight=weights, label_smoothing=args.label_smoothing)
+            loss = block_loss(logits, label, args.link, weights, args.label_smoothing)
             if not torch.isfinite(loss):
                 raise FloatingPointError(f"non-finite loss at epoch {epoch}")
             opt_head.zero_grad(set_to_none=True)
@@ -420,7 +442,7 @@ def main() -> None:
                         "seg_model_config": seg_model_config_from(model.seg, seg_config),
                         "classes": {"names": classes.names, "seg_index": classes.seg_index},
                         "head_config": {"attn_hidden": args.attn_hidden, "dropout": args.head_dropout,
-                                        "tile_size": args.block_size},
+                                        "tile_size": args.block_size, "link": args.link},
                         "source_checkpoint": str(args.seg_checkpoint),
                         "epoch": epoch, "metrics": val, "args": vars(args)}, ckpt_path)
             results["best_val"] = val
