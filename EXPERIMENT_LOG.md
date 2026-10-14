@@ -584,6 +584,42 @@ Paired normcdf − softmax, cell bootstrap:
 - **Likely reason.** With 2 000 blocks and 18 imbalanced classes, per-class BCE trains each rare class almost only on negatives. The paper's large, balanced datasets are a different regime. With 18 classes, Monte Carlo sampling costs nothing, so the paper's cost argument does not apply here.
 - The normcdf option stays in the code (`--link normcdf`; `BlockClassifier(link=...)`) for a larger future campaign.
 
+### E19 — Sequential campaigns with the diagonal Laplace filter (Sliwa et al., arXiv:2410.06800, diagonal version) (2026-10-14, cluster 17700743, `results/block_sequential/`)
+The prior → posterior → prior flow, simulated with the two expert observations as two labelling campaigns. Final Stage-4 recipe throughout (12 epochs, segmenter LR ×3, last epoch, seed 42); `run_sequential.sh`.
+1. **Campaign A** (ESP_075512, 1 337 train blocks), from the Stage-3 segmenter with the NOAH-H prior (τ 64.5). Its posterior (`scripts/fit_campaign_posterior.py`, `checkpoints/laplace/seqA_075512_posterior.pt`) is τ · F_NOAH-H + 1 337 · F̄_A over all weights.
+2. **Campaign B** (ESP_027201, 673 train blocks), from model A (`--init-block-checkpoint`), in two arms:
+   - **naive**: no prior;
+   - **filtered**: A's posterior as the prior (τ 1, i.e. data units, over all weights, head included, from the first epoch).
+
+| model | ESP_075512 test (A, 355) | ESP_027201 test (B, 176) | NOAH-H val mIoU |
+|---|---|---|---|
+| model A | 0.662 | 0.443 | 0.203 |
+| B naive | 0.507 | **0.699** | 0.154 |
+| B filtered | 0.552 | 0.682 | 0.189 |
+| joint A + B (`v2_final_lr3_e12`, reference) | **0.673** | **0.699** | 0.196 |
+
+Paired, filtered − naive, cell bootstrap:
+
+| test blocks | accuracy | macro-F1 ≥ 5 | NLL |
+|---|---|---|---|
+| ESP_075512 (campaign A) | **+0.045 [+0.023, +0.065]** | **+0.050 [+0.007, +0.087]** | **−0.35 [−0.56, −0.13]** |
+| ESP_027201 (campaign B) | −0.017 [−0.071, +0.025] | −0.056 [−0.167, +0.068] | **−0.13 [−0.25, −0.01]** |
+
+- **Without a prior, campaign B erases much of campaign A.** Accuracy on A drops by 0.155 and NOAH-H by 0.049 (the strongest forgetting of any run). B itself is learned as well as in joint training.
+- **The diagonal filter helps significantly but only partly.**
+  - It keeps 0.045 of the 0.155 accuracy on A (about 30 %), 0.035 of the 0.049 on NOAH-H, and gives better NLL on both campaigns.
+  - On B it costs nothing significant.
+  - It stays well short of joint training (0.552 vs 0.673 on A).
+- **Probable reasons.**
+  - A diagonal precision ignores weight correlations and is known to under-protect (EWC-like). This is the gap the paper's diagonal-plus-low-rank precision addresses.
+  - The posterior uses the untempered Bayesian strength (τ 1), and B was learned at almost full strength, so a stronger prior has room. E15 showed the same plasticity / stability trade-off for the NOAH-H prior.
+  - Training used class-weighted CE, while the Fisher weights all blocks equally.
+- **Practical consequence.** While earlier campaigns' blocks are kept, retraining jointly on all campaigns (with the NOAH-H prior) is clearly better than filtering. The filter is the fallback when earlier data cannot be reused, and it already halves the damage to NOAH-H.
+- Single seed. The A-retention effect is about 2× the E15 seed spread in accuracy; NLL and NOAH-H are clearer.
+- **Next, if wanted:**
+  - tempering the posterior (τ 3 / 10 / 30) to trace this frontier;
+  - the low-rank precision, if retention without old data matters.
+
 ## 7c. Stage 4 — what we learned, and what is open
 
 1. **The features transfer to new sites; NOAH-H's class mapping does not.** Zero-shot, the segmenter's dominant-class rule scores 0.018 val accuracy. A head on the frozen features reaches 0.58 after two probe epochs (E13).
@@ -611,9 +647,10 @@ Paired normcdf − softmax, cell bootstrap:
 8. **Site shift is not a blur effect.** The expert imagery is sharper and noisier than the Oxia DRG, but blurring it to the Oxia spectrum does not change the zero-shot collapse (E14).
 
 Done since: the Laplace posterior and the uncertainty / neural-PCA files for the block model (E17); the normcdf output link of Mucsányi et al. 2025, not adopted (E18).
+Sequential campaigns with the diagonal posterior as prior: tested (E19); it retains part of the earlier campaign, joint retraining is clearly better while the old blocks are available.
 
 Open / next:
-- **Campaign 2 with the posterior as prior.** The Stage-4 trainer applies its prior to `model.seg` only; it needs to apply `campaign1_posterior_v2_final_lr3_e12.pt` over all BlockClassifier parameters at τ = 1.
+- **Campaign 2.** Retrain jointly on campaigns 1 + 2 with the NOAH-H prior (E19). If campaign-1 blocks cannot be reused, use `--init-block-checkpoint v2_final_lr3_e12/best.pt --laplace-prior campaign1_posterior_v2_final_lr3_e12.pt --laplace-tau 1` (now supported), ideally with a tempered τ.
 - **Next labelling campaign.**
   - More blocks for Continuous small ripples, Discontinuous small ripples (non-bedrock), Boulder fields, Continuous large ripples, Periodic Bedrock Ridges and Yardangs.
   - At least one new observation held out entirely as test.
@@ -648,6 +685,7 @@ Open / next:
 | logs | `job_outputs/block_finetune/`, `job_outputs/block_cv/`, wandb `ai4exomars_block_finetune` |
 | tests | `vision_backend/tests/test_block_head.py`, `test_laplace_prior.py`, `test_prep_expert_blocks.py` |
 | uncertainty / explainability files | `scripts/fit_block_artifacts.py`, `run_block_artifacts.{sh,sub}`, `vision_backend/uncertainty/block_laplace.py`, `vision_backend/tests/test_block_artifacts.py` → files and `README.md` next to the checkpoint, `results/block_artifacts/<run>.json`, `checkpoints/laplace/campaign1_posterior_<run>.pt` |
+| sequential campaigns (E19) | `run_sequential.{sh,sub}`, `scripts/fit_campaign_posterior.py`, trainer `--init-block-checkpoint`, `compare_block_runs.py --obs` → `results/block_sequential/`, `checkpoints/block_finetune/seq*` |
 | output-link comparison (E18) | `run_link_cv.{sh,sub}`, `scripts/eval_link_cv_fold.py`, `scripts/summarize_link_cv.py` → `results/block_link_cv/` |
 | key commits | 55a165a (Stage 4), c88cae5 (calibration eval, Laplace prior), a0e3497 (1024 blocks, spatial CV), 840dd45 (uncertainty / explainability files), 1e27b2b (normcdf link, E18 harness) |
 
