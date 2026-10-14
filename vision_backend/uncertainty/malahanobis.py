@@ -227,6 +227,17 @@ def _min_class_distance(features: torch.Tensor, stats: MahalanobisStats) -> torc
     return torch.stack(distances, dim=0).min(dim=0).values
 
 
+def mahalanobis_distance(features: torch.Tensor, stats: MahalanobisStats) -> torch.Tensor:
+    """Distance of each feature vector [N, F] to the nearest class Gaussian -> [N].
+
+    For per-sample features (e.g. one vector per block), where
+    `mahalanobis_distance_map` is for per-pixel feature maps.
+    """
+    if features.ndim != 2 or features.shape[1] != stats.feature_dim:
+        raise ValueError(f"features must be [N, {stats.feature_dim}], got {tuple(features.shape)}")
+    return _min_class_distance(features.float(), stats)
+
+
 def mahalanobis_distance_map(pixel_features: torch.Tensor, stats: MahalanobisStats) -> torch.Tensor:
     """Per-pixel distance to the nearest class Gaussian.
 

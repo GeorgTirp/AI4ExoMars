@@ -83,6 +83,46 @@ def mc_fisher_diagonal_segmentation(
     return {n: a / count for n, a in acc.items()}, count
 
 
+def mc_fisher_diagonal_blocks(
+    model: torch.nn.Module,
+    batches: Iterable[dict],
+    *,
+    device: torch.device,
+    amp: bool = True,
+    log_every: int = 200,
+) -> tuple[dict[str, torch.Tensor], int]:
+    """Per-block diagonal MC Fisher of a block classifier (all trainable
+    parameters), averaged over blocks; the label is sampled from the model's
+    own block predictive. `batches` must yield ONE block each ({"image",
+    "valid"}), as in `mc_fisher_diagonal_segmentation`. Each block is one
+    observation, so the data precision of N blocks is N times the average."""
+    model.eval()
+    params = {n: p for n, p in model.named_parameters() if p.requires_grad}
+    acc = {n: torch.zeros_like(p, dtype=torch.float32) for n, p in params.items()}
+    count = 0
+    for batch in batches:
+        image = batch["image"].to(device)
+        if image.shape[0] != 1:
+            raise ValueError("mc_fisher_diagonal_blocks needs batches of one block")
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp and device.type == "cuda"):
+            logits = model(image, batch["valid"].to(device))
+        logp = F.log_softmax(logits.float(), dim=1)                       # [1, K]
+        with torch.no_grad():
+            y = torch.distributions.Categorical(logits=logp).sample()     # [1]
+        model.zero_grad(set_to_none=True)
+        logp[0, y[0]].backward()
+        for n, p in params.items():
+            if p.grad is not None:
+                acc[n] += p.grad.detach().float() ** 2
+        count += 1
+        if log_every and count % log_every == 0:
+            print(f"[laplace] Fisher: {count} blocks")
+    model.zero_grad(set_to_none=True)
+    if count == 0:
+        raise ValueError("no blocks")
+    return {n: a / count for n, a in acc.items()}, count
+
+
 def save_prior(path: str | Path, mean: dict[str, torch.Tensor], fisher: dict[str, torch.Tensor], **meta) -> None:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({"mean": {n: t.detach().float().cpu() for n, t in mean.items()},

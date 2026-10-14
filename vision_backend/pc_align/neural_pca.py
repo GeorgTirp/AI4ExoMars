@@ -41,6 +41,7 @@ __all__ = [
     "GalleryThumbnail",
     "NeuralPCAGallery",
     "compute_psi_batch",
+    "compute_block_psi",
     "fit_class_pca",
     "project_onto_components",
     "build_gallery_entry",
@@ -83,6 +84,16 @@ def compute_psi_batch(model: torch.nn.Module, class_id: int, *inputs: torch.Tens
     w_k = get_classifier_weight_vector(model, class_id)  # [F]
     phi = extract_pooled_features(model, *inputs)  # [B, F]
     return phi * w_k
+
+
+def compute_block_psi(fc_weight: torch.Tensor, phi: torch.Tensor, class_id: int) -> torch.Tensor:
+    """psi_k for the Stage-4 block classifier: fc.weight[k] (elementwise*) phi. Shape [B, D].
+
+    phi is `BlockClassifier.block_features(...)[0]` = [LN(z), p_bar], the input
+    of the block head's last layer -- the block-level counterpart of the
+    pooled decoder features in `compute_psi_batch`.
+    """
+    return phi.float() * fc_weight[class_id].detach().float().to(phi.device)
 
 
 def fit_class_pca(psi: torch.Tensor, class_id: int, *, n_components: int = 4) -> NeuralPCAResult:

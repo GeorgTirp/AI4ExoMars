@@ -137,6 +137,17 @@ class BlockClassifier(nn.Module):
 
     def forward(self, image: torch.Tensor, valid: Optional[torch.Tensor] = None) -> torch.Tensor:
         """image [B, 1, H, W]; valid [B, 1, H, W] (1 = imagery, 0 = nodata) or None."""
+        phi, offset = self.block_features(image, valid)
+        return offset + self.fc(phi)
+
+    def block_features(self, image: torch.Tensor, valid: Optional[torch.Tensor] = None):
+        """(phi, offset) with logits = offset + fc(phi).
+
+        phi = [LN(z), p_bar] [B, C + S] is the input of the last layer `fc` --
+        the block feature for last-layer Laplace, Mahalanobis scoring and neural
+        PCA (psi_k = fc.weight[k] * phi). offset = alpha * prior + class_bias
+        [B, K] is the part of the logits that `fc` does not see.
+        """
         feats = self.decode_features(image)                      # [B, C, h, w]
         pix = self.seg.decoder.head(self.seg.decoder.head_dropout(feats))
         if valid is None:
@@ -153,4 +164,4 @@ class BlockClassifier(nn.Module):
 
         z = self.dropout(self.norm(self.pool(feats, weight)))
         prior = log_pbar[:, self.prior_src] * self.prior_mask    # [B, K], 0 for new classes
-        return self.prior_scale * prior + self.class_bias + self.fc(torch.cat([z, log_pbar.exp()], dim=1))
+        return torch.cat([z, log_pbar.exp()], dim=1), self.prior_scale * prior + self.class_bias
